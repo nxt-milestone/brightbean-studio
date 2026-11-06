@@ -19,15 +19,22 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from django.db.models import Exists, OuterRef
 from ninja.errors import HttpError
 
 from apps.analytics.api_builders import build_account_analytics, build_post_analytics
 from apps.api.limits import check_platform_quota
 from apps.api.pagination import decode_offset_cursor, encode_offset_cursor
-from apps.api.schemas import PostResponse
+from apps.api.routers.posts import filter_posts, parse_labels, submit_post, visible_comments
+from apps.api.routers.posts import visible_posts_qs as _visible_posts_qs
+from apps.api.schemas import PostCommentResponse, PostResponse
 from apps.composer.models import PlatformPost, Post
-from apps.composer.services import create_post, transition_platform_post
+from apps.composer.services import (
+    base_content_snapshot,
+    create_post,
+    revert_approved_to_review,
+    sync_workspace_tags,
+    transition_platform_post,
+)
 from apps.inbox.models import InboxMessage, InboxReply
 from apps.inbox.services import (
     ReplyStateError,
@@ -138,29 +145,6 @@ def _serialize_post(post: Post, context: dict[str, Any]) -> dict:
     )
 
 
-def _visible_posts_qs(api_key):
-    """Posts this API key may see, as a queryset.
-
-    Same rule as REST's ``_get_workspace_post``: in the key's workspace,
-    with at least one platform target, and *every* target allowlisted — so a
-    partial-scope key never learns about siblings. Expressed in SQL (rather
-    than filtering child rows in Python) so callers can order, filter and
-    paginate on it without scanning rows they may not see.
-    """
-    allowed = [sa.id for sa in api_key.social_accounts.all()]
-    # A key can end up with an empty allowlist at runtime (its last account was
-    # disconnected/deleted). Short-circuit rather than leaning on Django folding
-    # ``__in=[]`` inside an ``exclude`` into a no-op: fail closed explicitly.
-    if not allowed:
-        return Post.objects.none()
-    children = PlatformPost.objects.filter(post_id=OuterRef("pk"))
-    return (
-        Post.objects.filter(workspace_id=api_key.workspace_id)
-        .filter(Exists(children))
-        .exclude(Exists(children.exclude(social_account_id__in=allowed)))
-    )
-
-
 def _get_post_for_key(api_key, post_id_str: str) -> Post:
     """Allowlist-respecting Post fetch shared by ``get_post`` / ``cancel_post``.
 
@@ -238,6 +222,7 @@ def _create_draft(args: dict, context: dict[str, Any]) -> dict:
     if args.get("proposed_publish_at") is not None:
         proposed_publish_at = _parse_iso_datetime(args["proposed_publish_at"], "proposed_publish_at")
     try:
+        tags, category = parse_labels(api_key.workspace, args.get("tags", []), args.get("category", ""))
         post = create_post(
             workspace=api_key.workspace,
             social_account=sa,
@@ -249,6 +234,8 @@ def _create_draft(args: dict, context: dict[str, Any]) -> dict:
             proposed_publish_at=proposed_publish_at,
             author=api_key.issued_by if api_key.issued_by_id else None,
             status="draft",
+            tags=tags,
+            category=category,
         )
     except ValueError as exc:
         raise JsonRpcError(INVALID_PARAMS, str(exc)) from exc
@@ -297,6 +284,17 @@ register_tool(
                         "A non-binding draft hint shown in the drafts/approval views — stored as-is, "
                         "not validated against the future, and never queued for publishing."
                     ),
+                },
+                "tags": {
+                    "type": "array",
+                    "items": {"type": "string", "maxLength": 100},
+                    "maxItems": 25,
+                    "description": "Free-form labels, e.g. P-0012 or format:carousel. New names join the workspace tag list.",
+                },
+                "category": {
+                    "type": "string",
+                    "maxLength": 100,
+                    "description": "Name of an existing workspace content category; empty for none. Unknown names are rejected.",
                 },
             },
             "required": ["social_account_id", "caption"],
@@ -442,10 +440,6 @@ _MCP_POST_LIMIT_MAX = 100
 def _list_posts(args: dict, context: dict[str, Any]) -> dict:
     api_key = context["api_key"]
 
-    status = args.get("status")
-    if status is not None and status not in PlatformPost.Status.values:
-        raise JsonRpcError(INVALID_PARAMS, f"status must be one of {', '.join(PlatformPost.Status.values)}")
-
     # ``or`` would swallow an explicit 0 as "unset" and hand back the default.
     raw_limit = args.get("limit")
     try:
@@ -463,9 +457,11 @@ def _list_posts(args: dict, context: dict[str, Any]) -> dict:
     # The allowlist lives in the queryset (see ``_visible_posts_qs``), so paging
     # is over posts this key can actually see — no scan cap, nothing silently
     # dropped. ``id`` tiebreaks ``-created_at`` to keep offsets stable.
-    qs = _visible_posts_qs(api_key).prefetch_related("platform_posts__social_account")
-    if status:
-        qs = qs.filter(Exists(PlatformPost.objects.filter(post_id=OuterRef("pk"), status=status)))
+    try:
+        qs = filter_posts(_visible_posts_qs(api_key), status=args.get("status"), tag=args.get("tag"))
+    except ValueError as exc:
+        raise JsonRpcError(INVALID_PARAMS, str(exc)) from exc
+    qs = qs.select_related("category").prefetch_related("platform_posts__social_account", "approval_actions__user")
     qs = qs.order_by("-created_at", "id")
 
     # limit + 1 probes for a next page without a second COUNT query.
@@ -487,8 +483,9 @@ register_tool(
         description=(
             "List posts in this API key's workspace, newest first (by creation time). Fills the gap "
             "left by get_post (which needs an id you may not have yet). Each item has the same shape "
-            "as get_post (aggregate status + per-platform child state). Only posts whose every "
-            "platform target is in the key's allowlist are returned. Optional `status` filter and "
+            "as get_post (aggregate status, tags, category, review history, per-platform child state). "
+            "Only posts whose every platform target is in the key's allowlist are returned. Optional "
+            "`status` and `tag` filters and "
             "`limit` (default 50, max 100). When more posts remain, `next_cursor` is non-null — pass "
             "it back as `cursor` for the next page; a null `next_cursor` means you have them all."
         ),
@@ -500,6 +497,7 @@ register_tool(
                     "enum": list(PlatformPost.Status.values),
                     "description": "Optional per-platform status; a post matches if any target has it.",
                 },
+                "tag": {"type": "string", "description": "Only posts carrying this exact tag."},
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
@@ -1614,5 +1612,203 @@ register_tool(
             "additionalProperties": False,
         },
         handler=_send_reply,
+    )
+)
+
+
+# ---------------------------------------------------------------------------
+# Review tools — REST parity with PATCH /posts/{id}, /comments and /submit.
+# Approve / reject stay human-only (web UI).
+# ---------------------------------------------------------------------------
+
+
+_UPDATE_TEXT_FIELDS = ("caption", "title", "first_comment", "internal_notes")
+
+
+def _update_post(args: dict, context: dict[str, Any]) -> dict:
+    from django.db import transaction
+
+    _require_perm(context, "create_posts")
+    if "post_id" not in args:
+        raise JsonRpcError(INVALID_PARAMS, "post_id is required")
+    post = _get_post_for_key(context["api_key"], args["post_id"])
+    if not post.is_editable:
+        raise JsonRpcError(INVALID_PARAMS, f"Post is not editable in status {post.status}")
+    for field in _UPDATE_TEXT_FIELDS:
+        if field in args and not isinstance(args[field], str):
+            raise JsonRpcError(INVALID_PARAMS, f"{field} must be a string")
+    try:
+        tags, category = parse_labels(post.workspace, args.get("tags"), args.get("category"))
+    except ValueError as exc:
+        raise JsonRpcError(INVALID_PARAMS, str(exc)) from exc
+
+    with transaction.atomic():
+        orig_content = base_content_snapshot(post)
+        update_fields = [f for f in _UPDATE_TEXT_FIELDS if f in args]
+        for field in update_fields:
+            setattr(post, field, args[field])
+        if args.get("proposed_publish_at") is not None:
+            post.proposed_publish_at = _parse_iso_datetime(args["proposed_publish_at"], "proposed_publish_at")
+            update_fields.append("proposed_publish_at")
+        if tags is not None:
+            post.tags = tags
+            update_fields.append("tags")
+        if "category" in args:
+            post.category = category
+            update_fields.append("category")
+        if update_fields:
+            post.save(update_fields=[*update_fields, "updated_at"])
+        sync_workspace_tags(post.workspace, tags)
+        # Same safety net as the composer and PATCH: edited content on an
+        # approved post goes back to review.
+        if base_content_snapshot(post) != orig_content:
+            revert_approved_to_review(post)
+    post.refresh_from_db()
+    return _wrap_text(_serialize_post(post, context))
+
+
+register_tool(
+    Tool(
+        name="update_post",
+        description=(
+            "Edit an existing post's text, tags or category (REST: PATCH /posts/{id}). Only fields you "
+            "send change; `tags` replaces the whole list. Refused while the post is in review or "
+            "published. Editing title, caption, first comment or tags of an approved post sends it "
+            "back to review. Media and schedule changes stay with the REST route and the composer."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "post_id": {"type": "string", "format": "uuid"},
+                "caption": {"type": "string", "maxLength": 10000},
+                "title": {"type": "string", "maxLength": 255},
+                "first_comment": {"type": "string", "maxLength": 10000},
+                "internal_notes": {"type": "string", "maxLength": 10000},
+                "proposed_publish_at": {"type": "string", "description": "ISO-8601 UTC suggested publish time."},
+                "tags": {
+                    "type": "array",
+                    "items": {"type": "string", "maxLength": 100},
+                    "maxItems": 25,
+                    "description": "Free-form labels, e.g. P-0012 or format:carousel. New names join the workspace tag list.",
+                },
+                "category": {
+                    "type": "string",
+                    "maxLength": 100,
+                    "description": "Name of an existing workspace content category; empty for none. Unknown names are rejected.",
+                },
+            },
+            "required": ["post_id"],
+            "additionalProperties": False,
+        },
+        handler=_update_post,
+    )
+)
+
+
+def _list_post_comments(args: dict, context: dict[str, Any]) -> dict:
+    if "post_id" not in args:
+        raise JsonRpcError(INVALID_PARAMS, "post_id is required")
+    post = _get_post_for_key(context["api_key"], args["post_id"])
+    comments = visible_comments(post, include_internal=_can_view_internal_notes(context))
+    return _wrap_text({"comments": [PostCommentResponse.from_comment(c).model_dump(mode="json") for c in comments]})
+
+
+register_tool(
+    Tool(
+        name="list_post_comments",
+        description=(
+            "List a post's review comments, oldest first (REST: GET /posts/{id}/comments). Each has "
+            "author_name (the API key's name for agent comments), body, visibility and parent_id."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {"post_id": {"type": "string", "format": "uuid"}},
+            "required": ["post_id"],
+            "additionalProperties": False,
+        },
+        handler=_list_post_comments,
+        read_only=True,
+    )
+)
+
+
+def _add_post_comment(args: dict, context: dict[str, Any]) -> dict:
+    from apps.approvals.comments import create_comment
+
+    _require_perm(context, "create_posts")
+    api_key = context["api_key"]
+    if "post_id" not in args:
+        raise JsonRpcError(INVALID_PARAMS, "post_id is required")
+    body = args.get("body")
+    if not isinstance(body, str) or not body.strip():
+        raise JsonRpcError(INVALID_PARAMS, "body is required")
+    visibility = args.get("visibility", "internal")
+    if visibility not in ("internal", "external"):
+        raise JsonRpcError(INVALID_PARAMS, "visibility must be internal or external")
+    parent_id = _parse_uuid(args["parent_id"], "parent_id") if args.get("parent_id") else None
+    post = _get_post_for_key(api_key, args["post_id"])
+    comment = create_comment(
+        post=post,
+        author=api_key.issued_by if api_key.issued_by_id else None,
+        body=body,
+        visibility=visibility,
+        parent_id=parent_id,
+        api_key_name=getattr(api_key, "name", ""),
+    )
+    return _wrap_text(PostCommentResponse.from_comment(comment).model_dump(mode="json"))
+
+
+register_tool(
+    Tool(
+        name="add_post_comment",
+        description=(
+            "Add a comment to a post's review thread (REST: POST /posts/{id}/comments). The thread "
+            "shows this API key's name as author. `visibility` internal (default, team only) or "
+            "external (also shown to client reviewers); `parent_id` replies to a comment."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "post_id": {"type": "string", "format": "uuid"},
+                "body": {"type": "string", "minLength": 1, "maxLength": 10000},
+                "visibility": {"type": "string", "enum": ["internal", "external"], "default": "internal"},
+                "parent_id": {"type": "string", "format": "uuid"},
+            },
+            "required": ["post_id", "body"],
+            "additionalProperties": False,
+        },
+        handler=_add_post_comment,
+    )
+)
+
+
+def _submit_post_for_review(args: dict, context: dict[str, Any]) -> dict:
+    _require_perm(context, "create_posts")
+    api_key = context["api_key"]
+    if "post_id" not in args:
+        raise JsonRpcError(INVALID_PARAMS, "post_id is required")
+    post = _get_post_for_key(api_key, args["post_id"])
+    try:
+        post = submit_post(post, api_key.issued_by, api_key.workspace)
+    except ValueError as exc:
+        raise JsonRpcError(INVALID_PARAMS, str(exc)) from exc
+    return _wrap_text(_serialize_post(post, context))
+
+
+register_tool(
+    Tool(
+        name="submit_post_for_review",
+        description=(
+            "Send a draft (or a post with changes requested, rejected, or edited after approval) to "
+            "review, exactly like the composer's submit button: status becomes pending_review and "
+            "reviewers are notified (REST: POST /posts/{id}/submit). Approving stays with people."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {"post_id": {"type": "string", "format": "uuid"}},
+            "required": ["post_id"],
+            "additionalProperties": False,
+        },
+        handler=_submit_post_for_review,
     )
 )

@@ -64,6 +64,67 @@ def sync_post_scheduled_at(post):
 
 
 # ---------------------------------------------------------------------------
+# Labels and review safety net, shared by the composer and the Agent API
+# ---------------------------------------------------------------------------
+
+
+def sync_workspace_tags(workspace, tag_names):
+    """Ensure Tag records exist for all given tag names in a workspace."""
+    from apps.composer.models import Tag
+
+    if not tag_names:
+        return
+    existing = set(Tag.objects.for_workspace(workspace.id).filter(name__in=tag_names).values_list("name", flat=True))
+    new_tags = [Tag(workspace=workspace, name=name) for name in tag_names if name not in existing]
+    if new_tags:
+        Tag.objects.bulk_create(new_tags, ignore_conflicts=True)
+
+
+def resolve_category(workspace, name: str | None):
+    """Return the workspace's ``ContentCategory`` called ``name``.
+
+    ``None`` or ``""`` mean "no category". Categories are workspace-unique by
+    name, so callers can address them by the label people see in the UI. An
+    unknown name raises ``ValueError`` rather than creating one: categories
+    drive calendar colours and queues, so they stay a deliberate settings
+    choice.
+    """
+    from apps.composer.models import ContentCategory
+
+    if not name:
+        return None
+    try:
+        return ContentCategory.objects.get(workspace=workspace, name=name)
+    except ContentCategory.DoesNotExist as exc:
+        known = list(ContentCategory.objects.filter(workspace=workspace).values_list("name", flat=True))
+        raise ValueError(f"Unknown category {name!r}; this workspace has {known}.") from exc
+
+
+def base_content_snapshot(post):
+    """Reviewable base content used to detect edits to an approved post."""
+    return (post.title, post.caption, post.first_comment, tuple(post.tags or []))
+
+
+def revert_approved_to_review(post):
+    """Option A: editing an approved post's content sends it back for re-approval.
+
+    Silently reverts any ``approved`` children to ``pending_review`` so edited
+    content can't publish without a fresh review. (The explicit "Resubmit for
+    review" button additionally notifies reviewers; this is the safety net for
+    plain saves/autosaves.) Returns the reverted children.
+    """
+    from apps.composer.models import PlatformPost
+
+    reverted = []
+    for pp in post.platform_posts.all():
+        if pp.status == "approved" and pp.can_transition_to("pending_review"):
+            pp.transition_to("pending_review")
+            pp.save(update_fields=[*PlatformPost.TRANSITION_FIELDS, "updated_at"])
+            reverted.append(pp)
+    return reverted
+
+
+# ---------------------------------------------------------------------------
 # Phase 2 — Agent-API-facing post creation
 # ---------------------------------------------------------------------------
 
@@ -85,6 +146,8 @@ def create_post(
     author=None,
     status: str = "draft",
     platform_overrides: dict[Any, dict[str, str | None]] | None = None,
+    tags: list[str] | None = None,
+    category=None,
 ):
     """Create a ``Post`` + one ``PlatformPost`` for ``social_account``.
 
@@ -113,6 +176,8 @@ def create_post(
     * Media assets are attached in order by their position in
       ``media_asset_ids``. They must already live in the workspace's
       media library.
+    * ``tags`` must already be normalized; ``category`` is a
+      ``ContentCategory`` of the same workspace (see ``resolve_category``).
 
     Returns the persisted ``Post`` with one ``PlatformPost`` child.
     """
@@ -130,6 +195,8 @@ def create_post(
         raise ValueError("status='scheduled' requires scheduled_at.")
     if social_account.workspace_id != workspace.id:
         raise ValueError(f"SocialAccount {social_account.id} is not in workspace {workspace.id}.")
+    if category is not None and category.workspace_id != workspace.id:
+        raise ValueError(f"Category {category.id} is not in workspace {workspace.id}.")
 
     # Refuse to queue work against a connection the platform itself has
     # rejected. ``failed`` rows still count against the platform quota
@@ -198,7 +265,10 @@ def create_post(
             # ``status`` (unlike ``scheduled_at``, which only exists once the
             # post is committed to the publisher).
             proposed_publish_at=proposed_publish_at,
+            tags=list(tags or []),
+            category=category,
         )
+        sync_workspace_tags(workspace, tags)
         # Each override field is independent: ``None`` (or omitted)
         # means "no platform-specific override; fall back to the post
         # value via ``PlatformPost.effective_*``". Any string —

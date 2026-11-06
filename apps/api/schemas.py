@@ -234,6 +234,21 @@ class CreatePostRequest(Schema):
             "never queued for publishing; cleared automatically if the post is scheduled."
         ),
     )
+    tags: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Free-form labels, e.g. ``P-0012`` or ``format:carousel``. Each at most 100 characters, "
+            "at most 25 per post, duplicates dropped. New names are added to the workspace tag list."
+        ),
+    )
+    category: str = Field(
+        "",
+        max_length=100,
+        description=(
+            "Name of one of the workspace's content categories (Settings → Categories). "
+            "Empty for none. An unknown name is rejected with 422; categories are not created implicitly."
+        ),
+    )
     idempotency_key: str | None = Field(
         None,
         max_length=128,
@@ -258,6 +273,15 @@ class UpdatePostRequest(Schema):
     proposed_publish_at: dt.datetime | None = Field(
         None,
         description="Set a draft's suggested publish time (UTC). Sending null is a no-op (cannot clear via PATCH).",
+    )
+    tags: list[str] | None = Field(
+        None,
+        description="Replaces the post's whole tag list. Omit (or send null) to leave it unchanged; ``[]`` clears it.",
+    )
+    category: str | None = Field(
+        None,
+        max_length=100,
+        description='Content category name. Omit (or send null) to leave it unchanged; ``""`` clears it.',
     )
 
 
@@ -298,6 +322,35 @@ class PlatformPostSummary(Schema):
         )
 
 
+class ApprovalActionSummary(Schema):
+    """One entry of a post's review history (newest first in ``PostResponse``)."""
+
+    action: str = Field(
+        ...,
+        description="``submitted``, ``approved``, ``changes_requested``, ``rejected``, ``resubmitted`` or ``held``.",
+    )
+    user_name: str = Field("", description="Who acted. Empty if that user was deleted.")
+    platform_post_id: uuid.UUID | None = Field(
+        None, description="The platform child the decision targeted; null when it covered the whole post."
+    )
+    comment: str = ""
+    created_at: dt.datetime
+
+    @field_serializer("created_at")
+    def _serialize_dt(self, value: dt.datetime | None) -> str | None:
+        return _serialize_utc_z(value)
+
+    @classmethod
+    def from_action(cls, action) -> ApprovalActionSummary:
+        return cls(
+            action=action.action,
+            user_name=action.user.display_name if action.user else "",
+            platform_post_id=action.platform_post_id,
+            comment=action.comment,
+            created_at=action.created_at,
+        )
+
+
 class PostResponse(Schema):
     id: uuid.UUID
     workspace_id: uuid.UUID
@@ -309,7 +362,13 @@ class PostResponse(Schema):
     published_at: dt.datetime | None
     proposed_publish_at: dt.datetime | None
     status: str  # derived aggregate
+    tags: list[str] = Field(default_factory=list)
+    category: str | None = Field(None, description="Content category name, or null.")
     platform_posts: list[PlatformPostSummary]
+    approval_history: list[ApprovalActionSummary] = Field(
+        default_factory=list,
+        description="Review decisions on this post, newest first: who submitted, approved or asked for changes, and when.",
+    )
     created_at: dt.datetime
     updated_at: dt.datetime
 
@@ -342,6 +401,10 @@ class PostResponse(Schema):
         else:
             children = post.platform_posts.select_related("social_account")
         platform_posts = [PlatformPostSummary.from_platform_post(pp) for pp in children]
+        if "approval_actions" in getattr(post, "_prefetched_objects_cache", {}):
+            actions = post.approval_actions.all()
+        else:
+            actions = post.approval_actions.select_related("user")
         return cls(
             id=post.id,
             workspace_id=post.workspace_id,
@@ -353,10 +416,62 @@ class PostResponse(Schema):
             published_at=post.published_at,
             proposed_publish_at=post.proposed_publish_at,
             status=post.status,
+            tags=list(post.tags or []),
+            category=post.category.name if post.category_id else None,
             platform_posts=platform_posts,
+            approval_history=[ApprovalActionSummary.from_action(a) for a in actions],
             created_at=post.created_at,
             updated_at=post.updated_at,
         )
+
+
+class PostsListResponse(Schema):
+    posts: list[PostResponse]
+    limit: int
+    next_cursor: str | None = None
+
+
+class PostCommentResponse(Schema):
+    """A review comment on a post (the composer's comment thread)."""
+
+    id: uuid.UUID
+    post_id: uuid.UUID
+    parent_id: uuid.UUID | None = Field(None, description="The comment this one replies to, if any.")
+    author_name: str = Field(
+        ..., description="The API key's name for comments written through the API, else the person's name."
+    )
+    body: str
+    visibility: str = Field(..., description="``internal`` (team only) or ``external`` (also shown to clients).")
+    created_at: dt.datetime
+
+    @field_serializer("created_at")
+    def _serialize_dt(self, value: dt.datetime | None) -> str | None:
+        return _serialize_utc_z(value)
+
+    @classmethod
+    def from_comment(cls, comment) -> PostCommentResponse:
+        return cls(
+            id=comment.id,
+            post_id=comment.post_id,
+            parent_id=comment.parent_comment_id,
+            author_name=comment.author_name,
+            body=comment.body,
+            visibility=comment.visibility,
+            created_at=comment.created_at,
+        )
+
+
+class PostCommentsListResponse(Schema):
+    comments: list[PostCommentResponse]
+
+
+class CreatePostCommentRequest(Schema):
+    body: str = Field(..., min_length=1, max_length=10_000)
+    visibility: Literal["internal", "external"] = Field(
+        "internal",
+        description="``internal`` (default) stays within the team; ``external`` is also shown to client reviewers.",
+    )
+    parent_id: uuid.UUID | None = Field(None, description="Reply to this comment of the same post.")
 
 
 # ---------------------------------------------------------------------------

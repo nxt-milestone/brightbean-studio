@@ -78,6 +78,11 @@ api = NinjaAPI(
         "set yet. Create Pinterest posts as drafts and schedule them from the "
         "composer after choosing a board. The same rule applies to PATCHing "
         "the media of a scheduled post.\n\n"
+        "**Review.** Posts carry `tags` and a `category` (a content category's name). "
+        "`POST /posts/{id}/submit` sends a draft to review exactly like the composer's button, "
+        "and `/posts/{id}/comments` reads and writes the review thread under the key's name. "
+        "Approving and rejecting stay in the web UI; editing an approved post's text, tags or "
+        "media sends it back to review, and `GET` returns the `approval_history`.\n\n"
         "**Deleting posts.** Posts cannot be deleted via the API in v1. "
         "Cancel a scheduled post with `POST /posts/{id}/cancel`; remove "
         "drafts from the workspace's drafts list in the web UI. Published "
@@ -240,6 +245,10 @@ def _action_for_path(method: str, path: str, *, status_code: int) -> str:
     if "/analytics/posts/" in path:
         return f"analytics.read.post.{status_code}"
     if "/posts/" in path:
+        if path.endswith("/comments"):
+            return f"post.comment.{'create' if method == 'POST' else 'list'}.{status_code}"
+        if path.endswith("/submit"):
+            return f"post.submit.{status_code}"
         if path.endswith("/schedule"):
             return f"post.schedule.{status_code}"
         if path.endswith("/cancel"):
