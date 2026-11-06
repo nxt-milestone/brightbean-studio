@@ -19,7 +19,7 @@ MENTION_REGEX = re.compile(r"(?:^|(?<=\s))@(\w[\w.]*)")
 MAX_ATTACHMENT_SIZE = 5 * 1024 * 1024  # 5MB
 
 
-def create_comment(post, author, body, visibility, parent_id=None, attachment=None):
+def create_comment(post, author, body, visibility, parent_id=None, attachment=None, api_key_name=""):
     """Create a comment on a post and notify @mentioned users.
 
     Args:
@@ -29,6 +29,7 @@ def create_comment(post, author, body, visibility, parent_id=None, attachment=No
         visibility: "internal" or "external".
         parent_id: UUID of parent comment for threading (optional).
         attachment: UploadedFile for image attachment (optional).
+        api_key_name: Name of the Agent API key writing it (optional).
 
     Returns:
         The created PostComment.
@@ -51,6 +52,7 @@ def create_comment(post, author, body, visibility, parent_id=None, attachment=No
         body=body,
         visibility=visibility,
         attachment=attachment,
+        api_key_name=api_key_name,
     )
 
     # Parse @mentions and notify

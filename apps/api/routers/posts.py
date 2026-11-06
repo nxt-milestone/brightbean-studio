@@ -1,4 +1,4 @@
-"""``/api/v1/posts/*`` — create, read, update, schedule, cancel.
+"""``/api/v1/posts/*`` — create, list, read, update, schedule, cancel, review.
 
 Every write path:
 
@@ -20,9 +20,10 @@ from __future__ import annotations
 
 import uuid
 
+from django.db.models import Exists, OuterRef, QuerySet
 from django.http import HttpRequest
 from django.shortcuts import get_object_or_404
-from ninja import Router
+from ninja import Query, Router
 from ninja.errors import HttpError
 
 from apps.api.limits import check_platform_quota, enforce_http_rate_limits
@@ -33,23 +34,36 @@ from apps.api.middleware import (
     log_audit_entry,
     release_idempotent_claim,
 )
+from apps.api.pagination import decode_offset_cursor, encode_offset_cursor
 from apps.api.schemas import (
+    CreatePostCommentRequest,
     CreatePostRequest,
+    PostCommentResponse,
+    PostCommentsListResponse,
     PostResponse,
+    PostsListResponse,
     ScheduleRequest,
     UpdatePostRequest,
 )
-from apps.composer.models import Post
+from apps.common.validators import normalize_tags
+from apps.composer.models import PlatformPost, Post
 from apps.composer.services import (
+    base_content_snapshot,
     create_post,
     media_change_blocker,
+    resolve_category,
+    revert_approved_to_review,
     sync_post_scheduled_at,
+    sync_workspace_tags,
     transition_platform_post,
     usable_media_types,
 )
 from apps.social_accounts.models import SocialAccount
 
 router = Router(tags=["posts"])
+
+_LIMIT_DEFAULT = 50
+_LIMIT_MAX = 100
 
 
 # ---------------------------------------------------------------------------
@@ -100,6 +114,55 @@ def _can_view_internal_notes(request: HttpRequest) -> bool:
 
 def _post_to_response(request: HttpRequest, post: Post) -> PostResponse:
     return PostResponse.from_post(post, include_internal_notes=_can_view_internal_notes(request))
+
+
+def visible_posts_qs(api_key) -> QuerySet[Post]:
+    """Posts this API key may see, as a queryset.
+
+    Same rule as ``_get_workspace_post``: in the key's workspace, with at
+    least one platform target, and *every* target allowlisted — so a
+    partial-scope key never learns about siblings. Expressed in SQL (rather
+    than filtering child rows in Python) so callers can order, filter and
+    paginate on it without scanning rows they may not see. Shared with the
+    MCP list tool.
+    """
+    allowed = [sa.id for sa in api_key.social_accounts.all()]
+    # A key can end up with an empty allowlist at runtime (its last account was
+    # disconnected/deleted). Short-circuit rather than leaning on Django folding
+    # ``__in=[]`` inside an ``exclude`` into a no-op: fail closed explicitly.
+    if not allowed:
+        return Post.objects.none()
+    children = PlatformPost.objects.filter(post_id=OuterRef("pk"))
+    return (
+        Post.objects.filter(workspace_id=api_key.workspace_id)
+        .filter(Exists(children))
+        .exclude(Exists(children.exclude(social_account_id__in=allowed)))
+    )
+
+
+def filter_posts(qs: QuerySet[Post], *, status: str | None, tag: str | None) -> QuerySet[Post]:
+    """Apply the list filters shared by REST and MCP; raises ``ValueError`` on a bad status."""
+    if status is not None:
+        if status not in PlatformPost.Status.values:
+            raise ValueError(f"status must be one of {', '.join(PlatformPost.Status.values)}")
+        qs = qs.filter(Exists(PlatformPost.objects.filter(post_id=OuterRef("pk"), status=status)))
+    if tag:
+        qs = qs.filter(tags__contains=[tag])
+    return qs
+
+
+def parse_labels(workspace, tags, category):
+    """Validate client-supplied ``tags`` / ``category``; ``None`` means "not sent".
+
+    Returns ``(tags, category)`` with tags normalized and the category name
+    resolved to a ``ContentCategory`` (or ``None`` for ``""``). Raises
+    ``ValueError`` so each surface maps it onto its own error shape.
+    """
+    if tags is not None:
+        tags = normalize_tags(tags)
+    if category is not None:
+        category = resolve_category(workspace, category)
+    return tags, category
 
 
 def _get_workspace_post(request: HttpRequest, post_id: uuid.UUID) -> Post:
@@ -163,6 +226,10 @@ def create(request, payload: CreatePostRequest):
     social_account = _resolve_account(request, payload.social_account_id)
     if payload.action == "schedule" and payload.scheduled_at is None:
         raise HttpError(422, "scheduled_at is required when action='schedule'.")
+    try:
+        tags, category = parse_labels(request.api_key.workspace, payload.tags, payload.category)
+    except ValueError as exc:
+        raise HttpError(422, str(exc)) from exc
 
     # Build the platform_overrides dict and validate that each override's
     # social_account_id matches one of the post's target accounts. In the
@@ -256,6 +323,8 @@ def create(request, payload: CreatePostRequest):
             author=request.user if not request.user.is_anonymous else None,
             status="scheduled" if payload.action == "schedule" else "draft",
             platform_overrides=platform_overrides,
+            tags=tags,
+            category=category,
         )
         body = _post_to_response(request, post)
         status_code = 201
@@ -286,6 +355,32 @@ def create(request, payload: CreatePostRequest):
         release_idempotent_claim(api_key=request.api_key, idempotency_key=idempotency_key)
         raise
     return status_code, body
+
+
+@router.get("/", response=PostsListResponse, summary="List posts")
+def list_posts(
+    request,
+    status: str | None = Query(None, description="A post matches if any platform target has this status."),
+    tag: str | None = Query(None, description="Only posts carrying this exact tag."),
+    limit: int = Query(_LIMIT_DEFAULT, ge=1, le=_LIMIT_MAX),
+    cursor: str | None = Query(None, description="Opaque cursor from a previous call's next_cursor."),
+):
+    """Posts whose every target is in the key's allowlist, newest first."""
+    enforce_http_rate_limits(request, is_write=False)
+    try:
+        qs = filter_posts(visible_posts_qs(request.api_key), status=status, tag=tag)
+        offset = decode_offset_cursor(cursor)
+    except ValueError as exc:
+        raise HttpError(422, str(exc)) from exc
+    qs = qs.select_related("category").prefetch_related("platform_posts__social_account", "approval_actions__user")
+    # limit + 1 probes for a next page without a COUNT; ``id`` keeps offsets stable.
+    rows = list(qs.order_by("-created_at", "id")[offset : offset + limit + 1])
+    log_audit_entry(request, action="post.list", target_id=None, status_code=200)
+    return PostsListResponse(
+        posts=[_post_to_response(request, p) for p in rows[:limit]],
+        limit=limit,
+        next_cursor=encode_offset_cursor(offset + limit) if len(rows) > limit else None,
+    )
 
 
 @router.get("/{post_id}", response=PostResponse, summary="Read a single post")
@@ -335,6 +430,11 @@ def update(request, post_id: uuid.UUID, payload: UpdatePostRequest):
     from apps.composer.models import PostMedia
     from apps.media_library.models import MediaAsset
 
+    try:
+        tags, category = parse_labels(post.workspace, payload.tags, payload.category)
+    except ValueError as exc:
+        raise HttpError(422, str(exc)) from exc
+
     wanted_media: list = []
     resolved_assets: dict = {}
     if payload.media_asset_ids is not None:
@@ -354,7 +454,14 @@ def update(request, post_id: uuid.UUID, payload: UpdatePostRequest):
             raise HttpError(422, reason)
 
     with transaction.atomic():
+        orig_content = base_content_snapshot(post)
         update_fields: list[str] = []
+        if tags is not None:
+            post.tags = tags
+            update_fields.append("tags")
+        if payload.category is not None:
+            post.category = category
+            update_fields.append("category")
         if payload.caption is not None:
             post.caption = payload.caption
             update_fields.append("caption")
@@ -400,6 +507,12 @@ def update(request, post_id: uuid.UUID, payload: UpdatePostRequest):
 
         if update_fields:
             post.save(update_fields=[*update_fields, "updated_at"])
+        sync_workspace_tags(post.workspace, tags)
+
+        # Same safety net as the composer: changed content or media on an
+        # approved post sends it back to review instead of publishing unseen.
+        if payload.media_asset_ids is not None or base_content_snapshot(post) != orig_content:
+            revert_approved_to_review(post)
 
         sync_post_scheduled_at(post)
 
@@ -477,4 +590,87 @@ def cancel(request, post_id: uuid.UUID):
 
     post.refresh_from_db()
     log_audit_entry(request, action="post.cancel", target_id=post.id, status_code=200)
+    return _post_to_response(request, post)
+
+
+# ---------------------------------------------------------------------------
+# Review: comments and submit-for-review. Approve / reject stay human-only
+# (web UI); no route here moves a post past review.
+# ---------------------------------------------------------------------------
+
+
+def visible_comments(post: Post, *, include_internal: bool):
+    """A post's live comments, oldest first; ``internal`` ones only for team members."""
+    from apps.approvals.models import PostComment
+
+    qs = PostComment.objects.filter(post=post, deleted_at__isnull=True).select_related("author")
+    if not include_internal:
+        qs = qs.filter(visibility=PostComment.Visibility.EXTERNAL)
+    return qs.order_by("created_at", "id")
+
+
+def submit_post(post: Post, user, workspace) -> Post:
+    """Send a post into review exactly as the composer's buttons do.
+
+    Mirrors the composer's choice between "Submit for approval" (fresh
+    drafts) and "Resubmit" (changes requested, rejected, or an approved post
+    that was edited), so reviewers get the same notifications and the same
+    ``ApprovalAction`` row. Raises ``ValueError`` when neither applies.
+    """
+    from apps.approvals.services import resubmit_post, submit_for_review
+
+    statuses = [pp.status for pp in post.platform_posts.all()]
+    if any(st in ("changes_requested", "rejected", "approved") for st in statuses):
+        moved = resubmit_post(post, user, workspace)
+    elif workspace.approval_workflow_mode == "none":
+        raise ValueError("This workspace has no approval workflow; there is no review to submit to.")
+    else:
+        moved = submit_for_review(post, user, workspace)
+    # Both services return the post on success and an empty list when no child could move.
+    if not moved:
+        raise ValueError(f"Nothing to submit: no platform post is in a submittable state ({sorted(set(statuses))}).")
+    post.refresh_from_db()
+    return post
+
+
+@router.get("/{post_id}/comments", response=PostCommentsListResponse, summary="List a post's review comments")
+def list_comments(request, post_id: uuid.UUID):
+    enforce_http_rate_limits(request, is_write=False)
+    post = _get_workspace_post(request, post_id)
+    comments = visible_comments(post, include_internal=_can_view_internal_notes(request))
+    log_audit_entry(request, action="post.comment.list", target_id=post.id, status_code=200)
+    return PostCommentsListResponse(comments=[PostCommentResponse.from_comment(c) for c in comments])
+
+
+@router.post("/{post_id}/comments", response={201: PostCommentResponse}, summary="Add a review comment")
+def create_comment(request, post_id: uuid.UUID, payload: CreatePostCommentRequest):
+    """Comment on a post's review thread; the thread shows the API key's name as author."""
+    from apps.approvals.comments import create_comment as create_post_comment
+
+    enforce_http_rate_limits(request, is_write=True)
+    _require_perm(request, "create_posts")
+    post = _get_workspace_post(request, post_id)
+    comment = create_post_comment(
+        post=post,
+        author=request.user if not request.user.is_anonymous else None,
+        body=payload.body,
+        visibility=payload.visibility,
+        parent_id=payload.parent_id,
+        api_key_name=getattr(request.api_key, "name", ""),
+    )
+    log_audit_entry(request, action="post.comment.create", target_id=post.id, status_code=201)
+    return 201, PostCommentResponse.from_comment(comment)
+
+
+@router.post("/{post_id}/submit", response=PostResponse, summary="Submit a draft for review")
+def submit(request, post_id: uuid.UUID):
+    """Move the post to ``pending_review`` and notify reviewers, like the composer's submit button."""
+    enforce_http_rate_limits(request, is_write=True)
+    _require_perm(request, "create_posts")
+    post = _get_workspace_post(request, post_id)
+    try:
+        post = submit_post(post, request.user, request.api_key.workspace)
+    except ValueError as exc:
+        raise HttpError(409, str(exc)) from exc
+    log_audit_entry(request, action="post.submit", target_id=post.id, status_code=200)
     return _post_to_response(request, post)

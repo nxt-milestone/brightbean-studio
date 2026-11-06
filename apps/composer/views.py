@@ -53,6 +53,9 @@ from .models import (
     Tag,
 )
 from .services import (
+    base_content_snapshot as _base_content_snapshot,
+)
+from .services import (
     media_blocker,
     media_change_blocker,
     post_media_types,
@@ -60,6 +63,8 @@ from .services import (
     require_publishable,
     usable_media_types,
 )
+from .services import revert_approved_to_review as _revert_approved_to_review
+from .services import sync_workspace_tags as _sync_tags_to_model
 from .status import READONLY_STATUSES, derive_post_status
 
 logger = logging.getLogger(__name__)
@@ -903,28 +908,6 @@ def _transition_post_children(post, target, *, allow_via_draft=True, only=None):
         except ValueError:
             skipped.append(pp)
     return moved, skipped
-
-
-def _base_content_snapshot(post):
-    """Reviewable base content used to detect edits to an approved post."""
-    return (post.title, post.caption, post.first_comment, tuple(post.tags or []))
-
-
-def _revert_approved_to_review(post):
-    """Option A: editing an approved post's content sends it back for re-approval.
-
-    Silently reverts any ``approved`` children to ``pending_review`` so edited
-    content can't publish without a fresh review. (The explicit "Resubmit for
-    review" button additionally notifies reviewers; this is the safety net for
-    plain saves/autosaves.) Returns the reverted children.
-    """
-    reverted = []
-    for pp in post.platform_posts.all():
-        if pp.status == "approved" and pp.can_transition_to("pending_review"):
-            pp.transition_to("pending_review")
-            pp.save(update_fields=[*PlatformPost.TRANSITION_FIELDS, "updated_at"])
-            reverted.append(pp)
-    return reverted
 
 
 def _platform_status_map(post):
@@ -3730,16 +3713,6 @@ def csv_confirm_import(request, workspace_id):
 # ---------------------------------------------------------------------------
 # Tag CRUD (JSON API endpoints)
 # ---------------------------------------------------------------------------
-
-
-def _sync_tags_to_model(workspace, tag_names):
-    """Ensure Tag records exist for all given tag names in a workspace."""
-    if not tag_names:
-        return
-    existing = set(Tag.objects.for_workspace(workspace.id).filter(name__in=tag_names).values_list("name", flat=True))
-    new_tags = [Tag(workspace=workspace, name=name) for name in tag_names if name not in existing]
-    if new_tags:
-        Tag.objects.bulk_create(new_tags, ignore_conflicts=True)
 
 
 @login_required

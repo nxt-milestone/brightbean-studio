@@ -88,6 +88,10 @@ class PostComment(models.Model):
         related_name="replies",
     )
     body = models.TextField()
+    # Name of the Agent API key that wrote the comment, snapshotted so the
+    # thread still says which agent spoke after the key is revoked. Empty for
+    # comments written in the web UI; ``author`` is then the person.
+    api_key_name = models.CharField(max_length=100, blank=True, default="")
     visibility = models.CharField(
         max_length=10,
         choices=Visibility.choices,
@@ -117,6 +121,13 @@ class PostComment(models.Model):
     @property
     def is_deleted(self):
         return self.deleted_at is not None
+
+    @property
+    def author_name(self):
+        """Who the thread shows: the API key's name, else the person's."""
+        if self.api_key_name:
+            return self.api_key_name
+        return self.author.display_name if self.author else ""
 
 
 class ApprovalReminder(models.Model):

@@ -5,11 +5,11 @@
         <!-- Author avatar -->
         <div class="w-7 h-7 rounded-full flex items-center justify-center text-[10px] font-bold text-white flex-shrink-0 mt-0.5"
              style="background: var(--primary);">
-            {{ comment.author.display_name|make_list|first|upper }}
+            {{ comment.author_name|make_list|first|upper }}
         </div>
         <div class="flex-1 min-w-0">
             <div class="flex items-center gap-2 mb-0.5">
-                <span class="text-[0.8125rem] font-semibold text-stone-800">{{ comment.author.display_name }}</span>
+                <span class="text-[0.8125rem] font-semibold text-stone-800">{{ comment.author_name }}</span>
                 {% if comment.visibility == 'internal' %}
                 <span class="text-[0.625rem] font-semibold uppercase tracking-wider text-amber-600 bg-amber-100 px-1.5 py-0.5 rounded">Internal</span>
                 {% endif %}
@@ -31,11 +31,11 @@
             <div class="flex gap-2 mt-2 pl-2 border-l-2 border-stone-200">
                 <div class="w-5 h-5 rounded-full flex items-center justify-center text-[8px] font-bold text-white flex-shrink-0"
                      style="background: var(--primary); opacity: 0.7;">
-                    {{ reply.author.display_name|make_list|first|upper }}
+                    {{ reply.author_name|make_list|first|upper }}
                 </div>
                 <div>
                     <div class="flex items-center gap-1.5">
-                        <span class="text-[0.75rem] font-semibold text-stone-700">{{ reply.author.display_name }}</span>
+                        <span class="text-[0.75rem] font-semibold text-stone-700">{{ reply.author_name }}</span>
                         <span class="text-[0.6875rem] text-stone-400">{{ reply.created_at|timesince }} ago</span>
                     </div>
                     <p class="text-[0.8125rem] text-stone-600 leading-relaxed">{{ reply.body }}</p>
