@@ -360,6 +360,97 @@ class PostResponse(Schema):
 
 
 # ---------------------------------------------------------------------------
+# /ideas — the Ideas board
+# ---------------------------------------------------------------------------
+
+
+class IdeaRequest(Schema):
+    """Fields of an idea card. On PATCH, omitted (or null) fields stay unchanged."""
+
+    title: str | None = Field(None, max_length=255)
+    description: str | None = Field(None, max_length=20_000, description="Card body (plain text).")
+    tags: list[str] | None = Field(
+        None,
+        description="Replaces the card's tag list. At most 25 tags of up to 100 characters; new names join the workspace tag list.",
+    )
+    group_id: uuid.UUID | None = Field(
+        None, description="Board column (see ``GET /ideas/groups``). New cards default to the first column."
+    )
+    media_asset_ids: list[uuid.UUID] | None = Field(
+        None, description="Replaces the attachments, in order; the first is the card's cover. ``[]`` removes all."
+    )
+
+
+class CreateIdeaRequest(IdeaRequest):
+    title: str = Field(..., min_length=1, max_length=255)
+
+
+class IdeaResponse(Schema):
+    id: uuid.UUID
+    workspace_id: uuid.UUID
+    title: str
+    description: str
+    tags: list[str]
+    group_id: uuid.UUID | None
+    group_name: str = ""
+    position: int
+    media_asset_ids: list[uuid.UUID]
+    post_id: uuid.UUID | None = Field(None, description="The post this idea was turned into, if any.")
+    created_at: dt.datetime
+    updated_at: dt.datetime
+
+    @field_serializer("created_at", "updated_at")
+    def _serialize_dt(self, value: dt.datetime | None) -> str | None:
+        return _serialize_utc_z(value)
+
+    @classmethod
+    def from_idea(cls, idea) -> IdeaResponse:
+        return cls(
+            id=idea.id,
+            workspace_id=idea.workspace_id,
+            title=idea.title,
+            description=idea.description,
+            tags=list(idea.tags or []),
+            group_id=idea.group_id,
+            group_name=idea.group.name if idea.group_id else "",
+            position=idea.position,
+            media_asset_ids=[m.media_asset_id for m in idea.media_attachments.all()],
+            post_id=idea.post_id,
+            created_at=idea.created_at,
+            updated_at=idea.updated_at,
+        )
+
+
+class IdeasListResponse(Schema):
+    ideas: list[IdeaResponse]
+    limit: int
+    next_cursor: str | None = None
+
+
+class IdeaGroupRequest(Schema):
+    name: str | None = Field(None, max_length=100)
+    position: int | None = Field(None, ge=0, description="Column order, left to right (0 first).")
+
+
+class CreateIdeaGroupRequest(IdeaGroupRequest):
+    name: str = Field(..., min_length=1, max_length=100)
+
+
+class IdeaGroupResponse(Schema):
+    id: uuid.UUID
+    name: str
+    position: int
+
+    @classmethod
+    def from_group(cls, group) -> IdeaGroupResponse:
+        return cls(id=group.id, name=group.name, position=group.position)
+
+
+class IdeaGroupsListResponse(Schema):
+    groups: list[IdeaGroupResponse]
+
+
+# ---------------------------------------------------------------------------
 # /media — write + read
 # ---------------------------------------------------------------------------
 
