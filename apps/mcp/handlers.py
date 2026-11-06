@@ -1616,3 +1616,165 @@ register_tool(
         handler=_send_reply,
     )
 )
+
+
+# ---------------------------------------------------------------------------
+# Calendar event tools — REST parity with /calendar/events. Same write path
+# (save_event), same create_posts gate for writes as the web calendar.
+# ---------------------------------------------------------------------------
+
+
+_EVENT_FIELDS = ("title", "description", "start_date", "end_date", "color")
+
+_EVENT_PROPS = {
+    "title": {"type": "string", "minLength": 1, "maxLength": 200},
+    "description": {"type": "string", "maxLength": 10000},
+    "start_date": {"type": "string", "format": "date", "description": "First day, YYYY-MM-DD."},
+    "end_date": {"type": "string", "format": "date", "description": "Last day (inclusive); defaults to start_date."},
+    "color": {"type": "string", "description": "Hex colour of the bar, e.g. #3B82F6 (default)."},
+}
+
+
+def _event_payload(args: dict) -> dict:
+    from pydantic import ValidationError
+
+    from apps.api.schemas import CalendarEventRequest
+
+    try:
+        return CalendarEventRequest(**{k: args[k] for k in _EVENT_FIELDS if k in args}).dict()
+    except ValidationError as exc:
+        raise JsonRpcError(INVALID_PARAMS, str(exc)) from exc
+
+
+def _serialize_event(event) -> dict:
+    from apps.api.schemas import CalendarEventResponse
+
+    return CalendarEventResponse.from_event(event).model_dump(mode="json")
+
+
+def _get_event_for_workspace(context: dict[str, Any], event_id_str: str):
+    from apps.calendar.models import CustomCalendarEvent
+
+    try:
+        return CustomCalendarEvent.objects.get(
+            id=_parse_uuid(event_id_str, "event_id"), workspace_id=context["workspace"].id
+        )
+    except CustomCalendarEvent.DoesNotExist as exc:
+        raise JsonRpcError(INVALID_PARAMS, "Calendar event not found") from exc
+
+
+def _list_calendar_events(args: dict, context: dict[str, Any]) -> dict:
+    from apps.api.routers.calendar import events_qs
+
+    window = _event_payload({k: args[k] for k in ("start_date", "end_date") if k in args})
+    events = events_qs(context["workspace"].id, start=window["start_date"], end=window["end_date"])[:500]
+    return _wrap_text({"events": [_serialize_event(e) for e in events]})
+
+
+register_tool(
+    Tool(
+        name="list_calendar_events",
+        description=(
+            "List the workspace's custom calendar events (launches, campaigns, deadlines) by start "
+            "day (REST: GET /calendar/events). Optional window: `start_date` keeps events ending on or "
+            "after it, `end_date` those starting on or before it."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {"start_date": _EVENT_PROPS["start_date"], "end_date": _EVENT_PROPS["end_date"]},
+            "additionalProperties": False,
+        },
+        handler=_list_calendar_events,
+        read_only=True,
+    )
+)
+
+
+def _create_calendar_event(args: dict, context: dict[str, Any]) -> dict:
+    from apps.api.routers.calendar import save_event
+
+    _require_perm(context, "create_posts")
+    api_key = context["api_key"]
+    try:
+        event = save_event(
+            context["workspace"],
+            created_by=api_key.issued_by if api_key.issued_by_id else None,
+            **_event_payload(args),
+        )
+    except ValueError as exc:
+        raise JsonRpcError(INVALID_PARAMS, str(exc)) from exc
+    return _wrap_text(_serialize_event(event))
+
+
+register_tool(
+    Tool(
+        name="create_calendar_event",
+        description=(
+            "Add an all-day event bar to the workspace calendar (REST: POST /calendar/events). Requires create_posts."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": _EVENT_PROPS,
+            "required": ["title", "start_date"],
+            "additionalProperties": False,
+        },
+        handler=_create_calendar_event,
+    )
+)
+
+
+def _update_calendar_event(args: dict, context: dict[str, Any]) -> dict:
+    from apps.api.routers.calendar import save_event
+
+    _require_perm(context, "create_posts")
+    if "event_id" not in args:
+        raise JsonRpcError(INVALID_PARAMS, "event_id is required")
+    event = _get_event_for_workspace(context, args["event_id"])
+    try:
+        event = save_event(context["workspace"], event, **_event_payload(args))
+    except ValueError as exc:
+        raise JsonRpcError(INVALID_PARAMS, str(exc)) from exc
+    return _wrap_text(_serialize_event(event))
+
+
+register_tool(
+    Tool(
+        name="update_calendar_event",
+        description=(
+            "Change a calendar event; only fields you send change (REST: PATCH /calendar/events/{id}). "
+            "Requires create_posts."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {"event_id": {"type": "string", "format": "uuid"}, **_EVENT_PROPS},
+            "required": ["event_id"],
+            "additionalProperties": False,
+        },
+        handler=_update_calendar_event,
+    )
+)
+
+
+def _delete_calendar_event(args: dict, context: dict[str, Any]) -> dict:
+    _require_perm(context, "create_posts")
+    if "event_id" not in args:
+        raise JsonRpcError(INVALID_PARAMS, "event_id is required")
+    event = _get_event_for_workspace(context, args["event_id"])
+    event_id = str(event.id)
+    event.delete()
+    return _wrap_text({"deleted": True, "event_id": event_id})
+
+
+register_tool(
+    Tool(
+        name="delete_calendar_event",
+        description="Remove a calendar event (REST: DELETE /calendar/events/{id}). Requires create_posts.",
+        input_schema={
+            "type": "object",
+            "properties": {"event_id": {"type": "string", "format": "uuid"}},
+            "required": ["event_id"],
+            "additionalProperties": False,
+        },
+        handler=_delete_calendar_event,
+    )
+)

@@ -360,6 +360,60 @@ class PostResponse(Schema):
 
 
 # ---------------------------------------------------------------------------
+# /calendar/events — custom calendar events
+# ---------------------------------------------------------------------------
+
+
+class CalendarEventRequest(Schema):
+    """An all-day event bar on the calendar. On PATCH, omitted (or null) fields stay unchanged."""
+
+    title: str | None = Field(None, max_length=200)
+    description: str | None = Field(None, max_length=10_000)
+    start_date: dt.date | None = Field(None, description="First day (YYYY-MM-DD).")
+    end_date: dt.date | None = Field(None, description="Last day, inclusive. Defaults to start_date on create.")
+    color: str | None = Field(None, description="Hex colour of the bar, e.g. ``#3B82F6`` (the default).")
+
+
+class CreateCalendarEventRequest(CalendarEventRequest):
+    title: str = Field(..., min_length=1, max_length=200)
+    start_date: dt.date = Field(..., description="First day (YYYY-MM-DD).")
+
+
+class CalendarEventResponse(Schema):
+    id: uuid.UUID
+    workspace_id: uuid.UUID
+    title: str
+    description: str
+    start_date: dt.date
+    end_date: dt.date
+    color: str
+    created_at: dt.datetime
+    updated_at: dt.datetime
+
+    @field_serializer("created_at", "updated_at")
+    def _serialize_dt(self, value: dt.datetime | None) -> str | None:
+        return _serialize_utc_z(value)
+
+    @classmethod
+    def from_event(cls, event) -> CalendarEventResponse:
+        return cls(
+            id=event.id,
+            workspace_id=event.workspace_id,
+            title=event.title,
+            description=event.description,
+            start_date=event.start_date,
+            end_date=event.end_date,
+            color=event.color,
+            created_at=event.created_at,
+            updated_at=event.updated_at,
+        )
+
+
+class CalendarEventsListResponse(Schema):
+    events: list[CalendarEventResponse]
+
+
+# ---------------------------------------------------------------------------
 # /media — write + read
 # ---------------------------------------------------------------------------
 

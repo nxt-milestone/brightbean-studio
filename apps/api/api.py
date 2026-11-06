@@ -20,6 +20,7 @@ from ninja.openapi.docs import Swagger
 from apps.api.auth import ApiKeyAuth, McpAuth
 from apps.api.routers.accounts import router as accounts_router
 from apps.api.routers.analytics import router as analytics_router
+from apps.api.routers.calendar import router as calendar_router
 from apps.api.routers.inbox import router as inbox_router
 from apps.api.routers.me import router as me_router
 from apps.api.routers.media import router as media_router
@@ -78,6 +79,9 @@ api = NinjaAPI(
         "set yet. Create Pinterest posts as drafts and schedule them from the "
         "composer after choosing a board. The same rule applies to PATCHing "
         "the media of a scheduled post.\n\n"
+        "**Calendar events.** `/calendar/events` lists, creates, updates and deletes the "
+        "workspace's custom calendar events (all-day coloured bars: launches, campaigns, "
+        "deadlines). Writing needs `create_posts`, as in the web calendar.\n\n"
         "**Deleting posts.** Posts cannot be deleted via the API in v1. "
         "Cancel a scheduled post with `POST /posts/{id}/cancel`; remove "
         "drafts from the workspace's drafts list in the web UI. Published "
@@ -98,6 +102,7 @@ api.add_router("/posts", posts_router)
 api.add_router("/media", media_router)
 api.add_router("/analytics", analytics_router)
 api.add_router("/inbox", inbox_router)
+api.add_router("/calendar", calendar_router)
 # MCP Streamable HTTP transport. Same audit + rate limits as REST, but a
 # wider auth class: ``McpAuth`` accepts both bb_studio_ keys AND OAuth 2.1
 # access tokens (Claude Desktop's native connector flow). Mounted last so
@@ -267,6 +272,9 @@ def _action_for_path(method: str, path: str, *, status_code: int) -> str:
                 return f"inbox.reply.discard.{status_code}"
         if method == "GET":
             return f"inbox.read.{status_code}"
+    if "/calendar/" in path:
+        verb = {"POST": "create", "PATCH": "update", "DELETE": "delete"}.get(method, "read")
+        return f"calendar_event.{verb}.{status_code}"
     if "/mcp" in path:
         return f"mcp.error.{status_code}"
     if "/accounts" in path:
