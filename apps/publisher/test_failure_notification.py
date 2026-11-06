@@ -134,7 +134,7 @@ class PublishFailureFanOutTest(TestCase):
         pp.refresh_from_db()
         self.assertEqual(pp.status, PlatformPost.Status.PUBLISHED)
         self.assertEqual(pp.platform_post_id, "platform-live-id")
-        self.assertEqual(Notification.objects.count(), 0)
+        self.assertEqual(Notification.objects.filter(event_type=EventType.POST_FAILED).count(), 0)
 
     def test_a_lost_race_leaves_the_caller_holding_the_truth(self):
         """When someone else settled the row, the in-memory object has to agree
@@ -181,4 +181,45 @@ class PublishFailureFanOutTest(TestCase):
             self.engine._fail_permanently(pp, "boom", user_message="It did not go out.")
 
         self.assertTrue(any("expected 'publishing'" in line for line in logs.output))
+        self.assertEqual(Notification.objects.count(), 0)
+
+
+class PublishedNotificationTest(TestCase):
+    """POST_PUBLISHED was an event type nothing sent; agents waiting on a post
+    going live (through the webhook channel) never heard of it."""
+
+    def setUp(self):
+        self.author = User.objects.create_user(
+            email="author@example.com", password="x", name="Author", tos_accepted_at=timezone.now()
+        )
+        org = Organization.objects.create(name="Org")
+        workspace = Workspace.objects.create(organization=org, name="WS")
+        self.post = Post.objects.create(workspace=workspace, caption="hi", author=self.author)
+        self.pp = PlatformPost.objects.create(
+            post=self.post,
+            social_account=SocialAccount.objects.create(
+                workspace=workspace,
+                platform="linkedin_company",
+                account_platform_id="li-1",
+                account_name="acct",
+                connection_status=SocialAccount.ConnectionStatus.CONNECTED,
+            ),
+            status=PlatformPost.Status.PUBLISHING,
+        )
+
+    def test_a_confirmed_publish_notifies_the_author_once(self):
+        PublishEngine()._mark_confirmed_published(self.pp, "urn:li:share:1")
+
+        notes = Notification.objects.filter(user=self.author, event_type=EventType.POST_PUBLISHED)
+        self.assertEqual(notes.count(), 1)
+        self.assertEqual(notes[0].data["post_id"], str(self.post.id))
+        self.assertEqual(notes[0].data["platform"], "linkedin_company")
+
+    def test_an_authorless_post_publishes_without_a_notice(self):
+        self.post.author = None
+        self.post.save(update_fields=["author"])
+        pp = PlatformPost.objects.get(pk=self.pp.pk)
+
+        PublishEngine()._mark_confirmed_published(pp, "urn:li:share:1")
+
         self.assertEqual(Notification.objects.count(), 0)
