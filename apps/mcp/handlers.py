@@ -1812,3 +1812,271 @@ register_tool(
         handler=_submit_post_for_review,
     )
 )
+
+
+# ---------------------------------------------------------------------------
+# Idea tools — REST parity with /ideas/*. Same write path (save_idea /
+# save_idea_group), same create_posts gate as the web board.
+# ---------------------------------------------------------------------------
+
+
+_IDEA_FIELDS = ("title", "description", "tags", "group_id", "media_asset_ids")
+
+
+def _idea_payload(args: dict) -> dict:
+    """Pick and type-check the idea fields an MCP caller sent."""
+    from pydantic import ValidationError
+
+    from apps.api.schemas import IdeaRequest
+
+    try:
+        return IdeaRequest(**{k: args[k] for k in _IDEA_FIELDS if k in args}).dict(exclude_unset=True)
+    except ValidationError as exc:
+        raise JsonRpcError(INVALID_PARAMS, str(exc)) from exc
+
+
+def _serialize_idea(idea) -> dict:
+    from apps.api.schemas import IdeaResponse
+
+    return IdeaResponse.from_idea(idea).model_dump(mode="json")
+
+
+def _get_idea_for_workspace(context: dict[str, Any], idea_id_str: str):
+    from apps.api.routers.ideas import ideas_qs
+    from apps.composer.models import Idea
+
+    try:
+        return ideas_qs(context["workspace"].id).get(id=_parse_uuid(idea_id_str, "idea_id"))
+    except Idea.DoesNotExist as exc:
+        raise JsonRpcError(INVALID_PARAMS, "Idea not found") from exc
+
+
+_IDEA_PROPS = {
+    "title": {"type": "string", "maxLength": 255},
+    "description": {"type": "string", "maxLength": 20000, "description": "Card body (plain text)."},
+    "tags": {
+        "type": "array",
+        "items": {"type": "string", "maxLength": 100},
+        "maxItems": 25,
+        "description": "Replaces the card's tags. New names join the workspace tag list.",
+    },
+    "group_id": {"type": "string", "format": "uuid", "description": "Board column (see list_idea_groups)."},
+    "media_asset_ids": {
+        "type": "array",
+        "items": {"type": "string", "format": "uuid"},
+        "description": "Replaces the attachments in order; the first is the cover. [] removes all.",
+    },
+}
+
+
+def _list_ideas(args: dict, context: dict[str, Any]) -> dict:
+    from apps.api.routers.ideas import ideas_qs
+
+    _require_perm(context, "create_posts")
+    raw_limit = args.get("limit")
+    try:
+        limit = _MCP_POST_LIMIT_DEFAULT if raw_limit is None else int(raw_limit)
+        offset = decode_offset_cursor(args.get("cursor"))
+    except (TypeError, ValueError) as exc:
+        raise JsonRpcError(INVALID_PARAMS, "limit or cursor is invalid") from exc
+    if limit < 1 or limit > _MCP_POST_LIMIT_MAX:
+        raise JsonRpcError(INVALID_PARAMS, f"limit must be between 1 and {_MCP_POST_LIMIT_MAX}")
+    group_id = _parse_uuid(args["group_id"], "group_id") if args.get("group_id") else None
+    qs = ideas_qs(context["workspace"].id, tag=args.get("tag"), group_id=group_id)
+    rows = list(qs[offset : offset + limit + 1])
+    return _wrap_text(
+        {
+            "ideas": [_serialize_idea(i) for i in rows[:limit]],
+            "limit": limit,
+            "next_cursor": encode_offset_cursor(offset + limit) if len(rows) > limit else None,
+        }
+    )
+
+
+register_tool(
+    Tool(
+        name="list_ideas",
+        description=(
+            "List cards on the workspace's Ideas board in board order (REST: GET /ideas/). Optional "
+            "`tag` and `group_id` filters, `limit` (default 50, max 100) and `cursor` paging. "
+            "Requires create_posts."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "tag": {"type": "string"},
+                "group_id": {"type": "string", "format": "uuid"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": _MCP_POST_LIMIT_MAX},
+                "cursor": {"type": "string"},
+            },
+            "additionalProperties": False,
+        },
+        handler=_list_ideas,
+        read_only=True,
+    )
+)
+
+
+def _get_idea(args: dict, context: dict[str, Any]) -> dict:
+    _require_perm(context, "create_posts")
+    if "idea_id" not in args:
+        raise JsonRpcError(INVALID_PARAMS, "idea_id is required")
+    return _wrap_text(_serialize_idea(_get_idea_for_workspace(context, args["idea_id"])))
+
+
+register_tool(
+    Tool(
+        name="get_idea",
+        description="Read one idea card (REST: GET /ideas/{id}). Requires create_posts.",
+        input_schema={
+            "type": "object",
+            "properties": {"idea_id": {"type": "string", "format": "uuid"}},
+            "required": ["idea_id"],
+            "additionalProperties": False,
+        },
+        handler=_get_idea,
+        read_only=True,
+    )
+)
+
+
+def _create_idea(args: dict, context: dict[str, Any]) -> dict:
+    from apps.api.routers.ideas import save_idea
+
+    _require_perm(context, "create_posts")
+    api_key = context["api_key"]
+    try:
+        idea = save_idea(
+            context["workspace"],
+            author=api_key.issued_by if api_key.issued_by_id else None,
+            **_idea_payload(args),
+        )
+    except ValueError as exc:
+        raise JsonRpcError(INVALID_PARAMS, str(exc)) from exc
+    return _wrap_text(_serialize_idea(idea))
+
+
+register_tool(
+    Tool(
+        name="create_idea",
+        description=(
+            "Add a card to the Ideas board (REST: POST /ideas/). Lands in the first column unless "
+            "`group_id` is given. Requires create_posts."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": _IDEA_PROPS,
+            "required": ["title"],
+            "additionalProperties": False,
+        },
+        handler=_create_idea,
+    )
+)
+
+
+def _update_idea(args: dict, context: dict[str, Any]) -> dict:
+    from apps.api.routers.ideas import save_idea
+
+    _require_perm(context, "create_posts")
+    if "idea_id" not in args:
+        raise JsonRpcError(INVALID_PARAMS, "idea_id is required")
+    idea = _get_idea_for_workspace(context, args["idea_id"])
+    try:
+        idea = save_idea(context["workspace"], idea, **_idea_payload(args))
+    except ValueError as exc:
+        raise JsonRpcError(INVALID_PARAMS, str(exc)) from exc
+    return _wrap_text(_serialize_idea(idea))
+
+
+register_tool(
+    Tool(
+        name="update_idea",
+        description=(
+            "Change an idea card (REST: PATCH /ideas/{id}). Only fields you send change; `tags` and "
+            "`media_asset_ids` replace the whole list; `group_id` moves the card. Requires create_posts."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {"idea_id": {"type": "string", "format": "uuid"}, **_IDEA_PROPS},
+            "required": ["idea_id"],
+            "additionalProperties": False,
+        },
+        handler=_update_idea,
+    )
+)
+
+
+def _list_idea_groups(args: dict, context: dict[str, Any]) -> dict:
+    from apps.api.routers.ideas import groups_qs
+    from apps.api.schemas import IdeaGroupResponse
+
+    _require_perm(context, "create_posts")
+    groups = [IdeaGroupResponse.from_group(g).model_dump(mode="json") for g in groups_qs(context["workspace"].id)]
+    return _wrap_text({"groups": groups})
+
+
+register_tool(
+    Tool(
+        name="list_idea_groups",
+        description="List the Ideas board's columns in order (REST: GET /ideas/groups). Requires create_posts.",
+        input_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        handler=_list_idea_groups,
+        read_only=True,
+    )
+)
+
+
+def _save_idea_group_tool(args: dict, context: dict[str, Any]) -> dict:
+    from apps.api.routers.ideas import save_idea_group
+    from apps.api.schemas import IdeaGroupResponse
+    from apps.composer.models import IdeaGroup
+
+    _require_perm(context, "create_posts")
+    workspace = context["workspace"]
+    group = None
+    if args.get("group_id"):
+        group = IdeaGroup.objects.filter(id=_parse_uuid(args["group_id"], "group_id"), workspace=workspace).first()
+        if group is None:
+            raise JsonRpcError(INVALID_PARAMS, "Idea group not found")
+    position = args.get("position")
+    if position is not None and (not isinstance(position, int) or isinstance(position, bool)):
+        raise JsonRpcError(INVALID_PARAMS, "position must be an integer")
+    try:
+        group = save_idea_group(workspace, group, name=args.get("name"), position=position)
+    except ValueError as exc:
+        raise JsonRpcError(INVALID_PARAMS, str(exc)) from exc
+    return _wrap_text(IdeaGroupResponse.from_group(group).model_dump(mode="json"))
+
+
+_GROUP_PROPS = {
+    "name": {"type": "string", "minLength": 1, "maxLength": 100},
+    "position": {"type": "integer", "minimum": 0, "description": "Column order, left to right (0 first)."},
+}
+
+register_tool(
+    Tool(
+        name="create_idea_group",
+        description="Add a column to the Ideas board, last by default (REST: POST /ideas/groups). Requires create_posts.",
+        input_schema={
+            "type": "object",
+            "properties": _GROUP_PROPS,
+            "required": ["name"],
+            "additionalProperties": False,
+        },
+        handler=_save_idea_group_tool,
+    )
+)
+
+register_tool(
+    Tool(
+        name="update_idea_group",
+        description="Rename or reorder an Ideas board column (REST: PATCH /ideas/groups/{id}). Requires create_posts.",
+        input_schema={
+            "type": "object",
+            "properties": {"group_id": {"type": "string", "format": "uuid"}, **_GROUP_PROPS},
+            "required": ["group_id"],
+            "additionalProperties": False,
+        },
+        handler=_save_idea_group_tool,
+    )
+)
