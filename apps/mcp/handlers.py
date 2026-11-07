@@ -576,7 +576,7 @@ register_tool(
 
 
 def _schedule_draft(args: dict, context: dict[str, Any]) -> dict:
-    """Promote every draft child of an existing post to ``scheduled``.
+    """Promote every draft or approved child of an existing post to ``scheduled``.
 
     Mirrors the REST ``POST /api/v1/posts/{post_id}/schedule`` route.
     Closes the asymmetry where MCP previously had no way to transition
@@ -599,9 +599,12 @@ def _schedule_draft(args: dict, context: dict[str, Any]) -> dict:
 
     api_key = context["api_key"]
     post = _get_post_for_key(api_key, args["post_id"])
-    drafts = [pp for pp in post.platform_posts.all() if pp.status == "draft"]
+    # Approved children count too: in a workspace that requires approval, a
+    # draft is refused by ``transition_platform_post`` but an approved child
+    # (a person signed it off) can be scheduled, as the REST route does.
+    drafts = [pp for pp in post.platform_posts.all() if pp.status in ("draft", "approved")]
     if not drafts:
-        raise JsonRpcError(INVALID_PARAMS, "No draft platform posts to schedule")
+        raise JsonRpcError(INVALID_PARAMS, "No draft or approved platform posts to schedule")
 
     # Per-platform 24h quota check, one per child, BEFORE we mutate
     # anything — over-quota fails the whole call with no partial commit.
@@ -633,9 +636,11 @@ register_tool(
     Tool(
         name="schedule_draft",
         description=(
-            "Schedule an EXISTING draft post — transitions every draft child to scheduled "
-            "at the given UTC timestamp. Use this for the two-step flow "
-            "'create_draft now, schedule_draft later'. For one-shot create-and-schedule, "
+            "Schedule an EXISTING draft or approved post — transitions every draft or approved "
+            "child to scheduled at the given UTC timestamp. Use this for the two-step flow "
+            "'create_draft now, schedule_draft later', or once a person has approved the post "
+            "in a workspace that requires approval (drafts are refused there). "
+            "For one-shot create-and-schedule, "
             "use schedule_post instead. Requires both create_posts and publish_directly. "
             "Refused when the post can't publish: accounts with requires_video need a video "
             "attached, those with requires_media need at least one media item, and a Pinterest "

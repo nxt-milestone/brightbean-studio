@@ -260,8 +260,12 @@ def transition_platform_post(
     # promotes a draft to scheduled (REST `/schedule` route, any future
     # MCP transition tool, the composer's HTMX `transition_platform_post`
     # view) is covered.
+    # A child that is already ``approved`` has passed the workflow (in the
+    # two-stage mode only the client's sign-off leaves it there), so scheduling
+    # it is the step after approval, as in the composer.
     if target_status == "scheduled":
-        _require_approval_gate_passes(platform_post.post.workspace)
+        if platform_post.status != "approved":
+            _require_approval_gate_passes(platform_post.post.workspace)
         require_publishable(platform_post)
 
     with transaction.atomic():
