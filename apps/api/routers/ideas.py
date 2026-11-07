@@ -77,12 +77,16 @@ def save_idea(
     tags=None,
     group_id=None,
     media_asset_ids=None,
+    post_id=None,
+    api_key=None,
 ) -> Idea:
     """Create (``idea=None``) or update an idea; ``None`` arguments are left unchanged.
 
     A new idea without ``group_id`` lands in the board's first column, as in
     the web UI. ``media_asset_ids`` replaces the attachments in order (the
-    first is the card's cover).
+    first is the card's cover). ``post_id`` links the post made from this idea
+    (one post per idea, as the web board's "create post"); the post must be
+    visible to ``api_key`` and not linked to another idea.
     """
     from apps.composer.views import _idea_columns, _sync_idea_media_attachments, _sync_tags_to_model
     from apps.media_library.models import MediaAsset
@@ -113,6 +117,16 @@ def save_idea(
         if missing:
             raise ValueError(f"Media asset(s) not in workspace: {missing}")
 
+    post = None
+    if post_id is not None:
+        from apps.api.routers.posts import visible_posts_qs
+
+        post = visible_posts_qs(api_key).filter(id=post_id).first() if api_key is not None else None
+        if post is None:
+            raise ValueError(f"Post {post_id} not found.")
+        if Idea.objects.filter(post=post).exclude(id=getattr(idea, "id", None)).exists():
+            raise ValueError(f"Post {post_id} is already linked to another idea.")
+
     with transaction.atomic():
         if idea is None:
             idea = Idea(workspace=workspace, author=author, status=Idea.Status.UNASSIGNED)
@@ -124,6 +138,8 @@ def save_idea(
             idea.tags = tags
         if group is not None:
             idea.group = group
+        if post is not None:
+            idea.post = post
         idea.save()
         if media_ids is not None:
             _sync_idea_media_attachments(idea, workspace, media_ids)
@@ -227,6 +243,7 @@ def create_idea(request, payload: CreateIdeaRequest):
         idea = save_idea(
             request.workspace,
             author=request.user if not request.user.is_anonymous else None,
+            api_key=request.api_key,  # type: ignore[attr-defined]
             **payload.dict(exclude_unset=True),
         )
     except ValueError as exc:
@@ -249,7 +266,12 @@ def update_idea(request, idea_id: uuid.UUID, payload: IdeaRequest):
     _write(request)
     idea = get_object_or_404(Idea, id=idea_id, workspace_id=request.workspace.id)
     try:
-        idea = save_idea(request.workspace, idea, **payload.dict(exclude_unset=True))
+        idea = save_idea(
+            request.workspace,
+            idea,
+            api_key=request.api_key,  # type: ignore[attr-defined]
+            **payload.dict(exclude_unset=True),
+        )
     except ValueError as exc:
         raise HttpError(422, str(exc)) from exc
     log_audit_entry(request, action="idea.update", target_id=idea.id, status_code=200)

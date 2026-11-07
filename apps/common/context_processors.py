@@ -1,5 +1,6 @@
 """Context processors for sidebar and global template data."""
 
+from django.conf import settings
 from django.db.models import Count, Q
 
 
@@ -131,6 +132,7 @@ def sidebar_context(request):
         )
 
     return {
+        "idea_description_template": settings.IDEA_DESCRIPTION_TEMPLATE,
         "sidebar_workspaces": sidebar_workspaces,
         "can_create_workspace": can_create_workspace,
         "sidebar_channels": sidebar_channels,

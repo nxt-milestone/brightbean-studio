@@ -135,6 +135,30 @@ class TestIdeasRest:
         assert setup["client"].get(f"/api/v1/ideas/{foreign.id}").status_code == 404
         assert _patch(setup["client"], f"/api/v1/ideas/{foreign.id}", {"title": "x"}).status_code == 404
 
+    def test_link_post_one_per_idea_and_visible_only(self, setup):
+        from apps.composer.models import PlatformPost, Post
+        from apps.social_accounts.models import SocialAccount
+
+        sa = SocialAccount.objects.get(workspace=setup["ws"])
+        post = Post.objects.create(workspace=setup["ws"], title="P")
+        PlatformPost.objects.create(post=post, social_account=sa)
+        a = Idea.objects.create(workspace=setup["ws"], title="A")
+        b = Idea.objects.create(workspace=setup["ws"], title="B")
+        resp = _patch(setup["client"], f"/api/v1/ideas/{a.id}", {"post_id": str(post.id)})
+        assert resp.status_code == 200 and resp.json()["post_id"] == str(post.id)
+        assert _patch(setup["client"], f"/api/v1/ideas/{a.id}", {"post_id": str(post.id)}).status_code == 200
+        assert _patch(setup["client"], f"/api/v1/ideas/{b.id}", {"post_id": str(post.id)}).status_code == 422
+        other_sa = SocialAccount.objects.create(
+            workspace=setup["ws"],
+            platform="x",
+            account_platform_id="x",
+            account_name="X",
+            connection_status="connected",
+        )
+        hidden = Post.objects.create(workspace=setup["ws"], title="H")
+        PlatformPost.objects.create(post=hidden, social_account=other_sa)
+        assert _patch(setup["client"], f"/api/v1/ideas/{b.id}", {"post_id": str(hidden.id)}).status_code == 422
+
 
 @pytest.mark.django_db
 class TestIdeasMcp:

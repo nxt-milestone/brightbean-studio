@@ -404,6 +404,10 @@ RESEND_WEBHOOK_SECRET = env("RESEND_WEBHOOK_SECRET", default="")
 NOTIFICATION_WEBHOOK_URL = env("NOTIFICATION_WEBHOOK_URL", default="")
 NOTIFICATION_WEBHOOK_TOKEN = env("NOTIFICATION_WEBHOOK_TOKEN", default="")
 
+# Starting text of a new idea's description in the web form (empty: blank form).
+# Write line breaks as "\n" in the env file.
+IDEA_DESCRIPTION_TEMPLATE = env("IDEA_DESCRIPTION_TEMPLATE", default="").replace("\\n", "\n")
+
 # Invitations. The cooldown and the send cap live on the Invitation row so they
 # survive a cache flush; the per-org daily cap uses the email budget counters.
 INVITE_RESEND_COOLDOWN_SECONDS = env.int("INVITE_RESEND_COOLDOWN_SECONDS", default=300)
