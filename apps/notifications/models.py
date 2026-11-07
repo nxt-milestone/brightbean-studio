@@ -43,6 +43,9 @@ class Notification(models.Model):
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
         related_name="notifications",
+        # None: a webhook-only notification from notify_webhook(), in no one's bell.
+        null=True,
+        blank=True,
     )
     event_type = models.CharField(max_length=50, choices=EventType.choices, db_index=True)
     title = models.CharField(max_length=255)

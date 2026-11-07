@@ -396,7 +396,9 @@ EMAIL_RECIPIENT_DAILY_LIMIT = env.int("EMAIL_RECIPIENT_DAILY_LIMIT", default=20)
 RESEND_WEBHOOK_SECRET = env("RESEND_WEBHOOK_SECRET", default="")
 
 # Notification webhooks. A user who turns the "Webhook" channel on in their
-# notification preferences gets their notifications POSTed here; the token goes
+# notification preferences gets their notifications POSTed here, and post
+# decisions (approved, changes requested, rejected, published, failed) come here
+# for every post, whoever wrote it (WEBHOOK_FEED_EVENTS); the token goes
 # out as X-Webhook-Token so the receiver can check the sender without knowing
 # SECRET_KEY, which the X-Signature-256 HMAC falls back to.
 NOTIFICATION_WEBHOOK_URL = env("NOTIFICATION_WEBHOOK_URL", default="")

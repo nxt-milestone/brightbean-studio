@@ -6,8 +6,9 @@ Covers the unified action contract (204 + HX-Trigger toast/refresh), the no-op
 """
 
 import json
+from unittest.mock import Mock, patch
 
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 
@@ -474,3 +475,52 @@ class PortalMixedPostActionTests(TestCase):
         self.assertEqual(resp.status_code, 200)
         approve_url = reverse("client_portal:approve", kwargs={"post_id": post.id})
         self.assertContains(resp, approve_url)
+
+
+@override_settings(NOTIFICATION_WEBHOOK_URL="https://n8n.example.com/webhook/bb")
+class DecisionWebhookTests(ApprovalWorkflowBase):
+    """Every decision reaches the webhook once, whoever wrote the post or made
+    the decision — a person can hand their own post to the agents."""
+
+    def _decide(self, action, *args):
+        with (
+            patch("socket.getaddrinfo", return_value=[(0, 0, 0, "", ("8.8.8.8", 0))]),
+            patch("httpx.post", return_value=Mock(status_code=200)) as httpx_post,
+        ):
+            action(*args)
+        return [json.loads(c.kwargs["content"]) for c in httpx_post.call_args_list]
+
+    def test_the_author_approving_their_own_post(self):
+        post = self._post("pending_review")
+        sent = self._decide(services.approve_post, post, self.author, self.ws)
+        self.assertEqual([(s["event_type"], s["data"]["post_id"]) for s in sent], [("post_approved", str(post.id))])
+
+    def test_once_even_when_the_author_has_the_webhook_channel_on(self):
+        from apps.notifications.models import Channel, EventType, NotificationPreference
+
+        for event in (EventType.POST_APPROVED, EventType.POST_CHANGES_REQUESTED, EventType.POST_REJECTED):
+            NotificationPreference.objects.create(
+                user=self.author, event_type=event, channel=Channel.WEBHOOK, is_enabled=True
+            )
+        cases = [
+            (services.approve_post, (), "post_approved"),
+            (services.request_changes, ("Shorter",), "post_changes_requested"),
+            (services.reject_post, ("No",), "post_rejected"),
+        ]
+        for action, extra, event_type in cases:
+            post = self._post("pending_review")
+            sent = self._decide(action, post, self.reviewer, self.ws, *extra)
+            self.assertEqual([s["event_type"] for s in sent], [event_type])
+
+    def test_two_stage_sends_approved_only_at_client_signoff(self):
+        self.ws.approval_workflow_mode = "required_internal_and_client"
+        self.ws.save(update_fields=["approval_workflow_mode"])
+        post = self._post("pending_review")
+
+        self.assertEqual(self._decide(services.approve_post, post, self.reviewer, self.ws), [])
+        sent = self._decide(services.approve_post, post, self.reviewer, self.ws)
+        self.assertEqual([s["event_type"] for s in sent], ["post_approved"])
+
+    def test_a_noop_sends_nothing(self):
+        post = self._post("approved")
+        self.assertEqual(self._decide(services.approve_post, post, self.reviewer, self.ws), [])

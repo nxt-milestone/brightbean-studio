@@ -142,6 +142,21 @@ NON_CRITICAL_EVENTS = {
     EventType.ENGAGEMENT_ALERT,
 }
 
+# Post decisions NOTIFICATION_WEBHOOK_URL receives for every post, through
+# notify_webhook(), whoever wrote the post or acted on it. A per-user Webhook
+# channel would only hear about posts its user wrote, and only when someone
+# else acted, so notify() leaves the channel out for these events: the receiver
+# gets each one exactly once.
+WEBHOOK_FEED_EVENTS = frozenset(
+    {
+        EventType.POST_APPROVED,
+        EventType.POST_CHANGES_REQUESTED,
+        EventType.POST_REJECTED,
+        EventType.POST_PUBLISHED,
+        EventType.POST_FAILED,
+    }
+)
+
 
 def notify(
     user,
@@ -177,6 +192,8 @@ def notify(
     )
 
     channels_to_dispatch = _resolve_channels(user, event_type)
+    if event_type in WEBHOOK_FEED_EVENTS:
+        channels_to_dispatch = [c for c in channels_to_dispatch if c != Channel.WEBHOOK]
     digest_mode = _is_digest_mode(user)
 
     if _is_in_quiet_hours(user) and event_type in NON_CRITICAL_EVENTS:
@@ -210,6 +227,26 @@ def notify(
             continue
         _dispatch(delivery)
 
+    return notification
+
+
+def notify_webhook(event_type: str, title: str, body: str = "", data: dict | None = None) -> Notification | None:
+    """Send one WEBHOOK_FEED_EVENTS event to NOTIFICATION_WEBHOOK_URL.
+
+    Call once per event, not per recipient. The notification has no user, so it
+    shows in nobody's bell; its delivery is retried like any other webhook.
+    Returns None when no URL is configured.
+    """
+    if not settings.NOTIFICATION_WEBHOOK_URL:
+        return None
+    notification = Notification.objects.create(
+        user=None, event_type=event_type, title=title, body=body, data=data or {}
+    )
+    _dispatch(
+        NotificationDelivery.objects.create(
+            notification=notification, channel=Channel.WEBHOOK, status=DeliveryStatus.PENDING
+        )
+    )
     return notification
 
 
@@ -359,6 +396,8 @@ def _dispatch_email(delivery: NotificationDelivery) -> None:
     """Send notification email using Django's email backend."""
     notification = delivery.notification
     user = notification.user
+    if user is None:
+        raise EmailNotSentError("This notification has no recipient (webhook only).")
 
     context = {
         "notification": notification,
@@ -416,7 +455,7 @@ def _dispatch_webhook(delivery: NotificationDelivery) -> None:
             "body": notification.body,
             "data": notification.data,
             "created_at": notification.created_at.isoformat(),
-            "user_id": str(notification.user_id),
+            "user_id": str(notification.user_id) if notification.user_id else None,
         },
         default=str,
     ).encode("utf-8")
