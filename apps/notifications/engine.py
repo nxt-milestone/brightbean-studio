@@ -398,7 +398,7 @@ def _dispatch_webhook(delivery: NotificationDelivery) -> None:
 
     notification = delivery.notification
 
-    webhook_url = notification.data.get("webhook_url")
+    webhook_url = notification.data.get("webhook_url") or settings.NOTIFICATION_WEBHOOK_URL
     if not webhook_url:
         logger.info("No webhook_url in notification data, skipping webhook delivery")
         return
@@ -433,6 +433,8 @@ def _dispatch_webhook(delivery: NotificationDelivery) -> None:
         "X-Signature-256": f"sha256={signature}",
         "X-Event-Type": notification.event_type,
     }
+    if settings.NOTIFICATION_WEBHOOK_TOKEN:
+        headers["X-Webhook-Token"] = settings.NOTIFICATION_WEBHOOK_TOKEN
 
     # follow_redirects=False prevents a 302→private-IP bait-and-switch from a
     # legitimate-looking endpoint. Any redirect is surfaced as a delivery

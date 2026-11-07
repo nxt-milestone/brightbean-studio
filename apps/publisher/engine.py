@@ -631,6 +631,8 @@ class PublishEngine:
                     platform_post.status = PlatformPost.Status.PUBLISHED
                     platform_post.published_at = timezone.now()
                 platform_post.save()
+                if not result.get("async_publish"):
+                    self._notify_published(platform_post)
 
                 if not result.get("async_publish"):
                     # A published post leaves the queue: drop the QueueEntry that
@@ -1084,6 +1086,39 @@ class PublishEngine:
         self._notify_publish_failed(platform_post)
 
     @staticmethod
+    def _notify_published(platform_post):
+        """Tell the post's author their post is live.
+
+        POST_PUBLISHED existed as an event type but nothing sent it. Best-effort
+        like the failure notice: the post is already live, and a notification
+        problem must not turn the publish into a retry (and a double post).
+        """
+        try:
+            from apps.notifications.engine import notify
+            from apps.notifications.models import EventType
+
+            author = platform_post.post.author
+            if not author:
+                return
+            platform = platform_post.social_account.get_platform_display()
+            notify(
+                author,
+                EventType.POST_PUBLISHED,
+                title=f"{platform} post published",
+                body=platform_post.post.caption_snippet,
+                data={
+                    "post_id": str(platform_post.post_id),
+                    "platform_post_id": str(platform_post.id),
+                    "platform": platform_post.social_account.platform,
+                },
+            )
+        except Exception:
+            logger.exception(
+                "Could not notify the author that PlatformPost %s was published",
+                platform_post.id,
+            )
+
+    @staticmethod
     def _notify_publish_failed(platform_post):
         """Tell the post's author their post didn't go out.
 
@@ -1381,6 +1416,7 @@ class PublishEngine:
         self._drop_queue_entry(platform_post)
         self._sync_parent_published_at(platform_post.post)
         self._maybe_schedule_first_comment(platform_post)
+        self._notify_published(platform_post)
         logger.info("Confirmed publish of PlatformPost %s as %s", platform_post.id, platform_post_id)
 
     def _update_rate_limit(self, account, result):

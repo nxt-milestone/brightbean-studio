@@ -397,6 +397,13 @@ EMAIL_RECIPIENT_HOURLY_LIMIT = env.int("EMAIL_RECIPIENT_HOURLY_LIMIT", default=6
 EMAIL_RECIPIENT_DAILY_LIMIT = env.int("EMAIL_RECIPIENT_DAILY_LIMIT", default=20)
 RESEND_WEBHOOK_SECRET = env("RESEND_WEBHOOK_SECRET", default="")
 
+# Notification webhooks. A user who turns the "Webhook" channel on in their
+# notification preferences gets their notifications POSTed here; the token goes
+# out as X-Webhook-Token so the receiver can check the sender without knowing
+# SECRET_KEY, which the X-Signature-256 HMAC falls back to.
+NOTIFICATION_WEBHOOK_URL = env("NOTIFICATION_WEBHOOK_URL", default="")
+NOTIFICATION_WEBHOOK_TOKEN = env("NOTIFICATION_WEBHOOK_TOKEN", default="")
+
 # Invitations. The cooldown and the send cap live on the Invitation row so they
 # survive a cache flush; the per-org daily cap uses the email budget counters.
 INVITE_RESEND_COOLDOWN_SECONDS = env.int("INVITE_RESEND_COOLDOWN_SECONDS", default=300)

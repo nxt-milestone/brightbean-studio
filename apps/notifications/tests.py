@@ -302,3 +302,64 @@ class TestWebhookDispatchSSRFGuard:
             delivery = self._build_delivery(user, "https://hooks.example.com/abc")
             _dispatch_webhook(delivery)
             httpx_post.assert_called_once()
+
+
+@pytest.mark.django_db
+class TestWebhookTargetFromSettings:
+    """Nothing in the app puts a webhook_url into a notification, so without a
+    configured target the Webhook channel never sent anything."""
+
+    def _delivery(self, user, data=None):
+        notification = Notification.objects.create(
+            user=user, event_type=EventType.POST_APPROVED, title="t", body="b", data=data or {"post_id": "p1"}
+        )
+        return NotificationDelivery.objects.create(
+            notification=notification, channel=Channel.WEBHOOK, status=DeliveryStatus.PENDING
+        )
+
+    def _send(self, delivery):
+        from apps.notifications.engine import _dispatch_webhook
+
+        with (
+            patch("socket.getaddrinfo", return_value=[(0, 0, 0, "", ("8.8.8.8", 0))]),
+            patch("httpx.post", return_value=Mock(status_code=200)) as httpx_post,
+        ):
+            _dispatch_webhook(delivery)
+        return httpx_post
+
+    def test_falls_back_to_the_configured_url_and_sends_the_token(self, user, settings):
+        settings.NOTIFICATION_WEBHOOK_URL = "https://n8n.example.com/webhook/bb"
+        settings.NOTIFICATION_WEBHOOK_TOKEN = "tok"
+
+        httpx_post = self._send(self._delivery(user))
+
+        httpx_post.assert_called_once()
+        assert httpx_post.call_args.args[0] == "https://n8n.example.com/webhook/bb"
+        assert httpx_post.call_args.kwargs["headers"]["X-Webhook-Token"] == "tok"
+
+    def test_a_url_in_the_notification_still_wins(self, user, settings):
+        settings.NOTIFICATION_WEBHOOK_URL = "https://n8n.example.com/webhook/bb"
+
+        httpx_post = self._send(self._delivery(user, {"webhook_url": "https://other.example.com/x"}))
+
+        assert httpx_post.call_args.args[0] == "https://other.example.com/x"
+
+    def test_no_token_header_without_a_token(self, user, settings):
+        settings.NOTIFICATION_WEBHOOK_URL = "https://n8n.example.com/webhook/bb"
+        settings.NOTIFICATION_WEBHOOK_TOKEN = ""
+
+        httpx_post = self._send(self._delivery(user))
+
+        assert "X-Webhook-Token" not in httpx_post.call_args.kwargs["headers"]
+
+    def test_still_refuses_a_private_configured_url(self, user, settings):
+        from apps.notifications.engine import _dispatch_webhook
+
+        settings.NOTIFICATION_WEBHOOK_URL = "http://n8n:5678/webhook/bb"
+        with (
+            patch("socket.getaddrinfo", return_value=[(0, 0, 0, "", ("10.0.0.5", 0))]),
+            patch("httpx.post") as httpx_post,
+            pytest.raises(RuntimeError, match="rejected"),
+        ):
+            _dispatch_webhook(self._delivery(user))
+        httpx_post.assert_not_called()
