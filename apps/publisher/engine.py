@@ -1094,24 +1094,22 @@ class PublishEngine:
         problem must not turn the publish into a retry (and a double post).
         """
         try:
-            from apps.notifications.engine import notify
+            from apps.notifications.engine import notify, notify_webhook
             from apps.notifications.models import EventType
 
-            author = platform_post.post.author
-            if not author:
-                return
             platform = platform_post.social_account.get_platform_display()
-            notify(
-                author,
-                EventType.POST_PUBLISHED,
-                title=f"{platform} post published",
-                body=platform_post.post.caption_snippet,
-                data={
-                    "post_id": str(platform_post.post_id),
-                    "platform_post_id": str(platform_post.id),
-                    "platform": platform_post.social_account.platform,
-                },
-            )
+            title = f"{platform} post published"
+            body = platform_post.post.caption_snippet
+            data = {
+                "post_id": str(platform_post.post_id),
+                "platform_post_id": str(platform_post.id),
+                "platform": platform_post.social_account.platform,
+            }
+            author = platform_post.post.author
+            if author:
+                notify(author, EventType.POST_PUBLISHED, title=title, body=body, data=data)
+            # Every post, whoever wrote it.
+            notify_webhook(EventType.POST_PUBLISHED, title=title, body=body, data=data)
         except Exception:
             logger.exception(
                 "Could not notify the author that PlatformPost %s was published",
@@ -1128,24 +1126,22 @@ class PublishEngine:
         already marked failed, and a notification problem must not unwind that.
         """
         try:
-            from apps.notifications.engine import notify
+            from apps.notifications.engine import notify, notify_webhook
             from apps.notifications.models import EventType
 
-            author = platform_post.post.author
-            if not author:
-                return
             platform = platform_post.social_account.get_platform_display()
-            notify(
-                author,
-                EventType.POST_FAILED,
-                title=f"{platform} post failed to publish",
-                body=platform_post.publish_error,
-                data={
-                    "post_id": str(platform_post.post_id),
-                    "platform_post_id": str(platform_post.id),
-                    "platform": platform_post.social_account.platform,
-                },
-            )
+            title = f"{platform} post failed to publish"
+            body = platform_post.publish_error
+            data = {
+                "post_id": str(platform_post.post_id),
+                "platform_post_id": str(platform_post.id),
+                "platform": platform_post.social_account.platform,
+            }
+            author = platform_post.post.author
+            if author:
+                notify(author, EventType.POST_FAILED, title=title, body=body, data=data)
+            # Every post, whoever wrote it.
+            notify_webhook(EventType.POST_FAILED, title=title, body=body, data=data)
         except Exception:
             logger.exception(
                 "Could not notify the author that PlatformPost %s failed",

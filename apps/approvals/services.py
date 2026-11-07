@@ -16,7 +16,7 @@ from django.db import transaction
 
 from apps.composer.models import PlatformPost, Post
 from apps.members.models import WorkspaceMembership
-from apps.notifications.engine import notify
+from apps.notifications.engine import notify, notify_webhook
 from apps.notifications.models import EventType
 
 from .models import ApprovalAction, ApprovalReminder
@@ -72,6 +72,15 @@ def _record_action(post, platform_post, user, action, comment=""):
         action=action,
         comment=comment,
     )
+
+
+def _notify_decision(post, actor, workspace, event_type, *, title, body):
+    """Tell the author about a decision on their post (unless they made it), and
+    send it to the configured webhook for every post, whoever wrote it."""
+    data = {"post_id": str(post.id), "workspace_id": str(workspace.id)}
+    if post.author and post.author != actor:
+        notify(user=post.author, event_type=event_type, title=title, body=body, data=data)
+    notify_webhook(event_type, title=title, body=body, data=data)
 
 
 def _notify_reviewers(workspace, actor, *, post, event_type, title, body):
@@ -176,16 +185,14 @@ def approve_post(target, user, workspace, comment=""):
     # Only tell the author "approved" when the post actually reached approved —
     # in two-stage mode an internal approval that advances to pending_client is
     # not done yet (the client still has to sign off, which re-enters this fn).
-    if post.author and post.author != user and not advanced_to_client:
-        notify(
-            user=post.author,
-            event_type=EventType.POST_APPROVED,
+    if not advanced_to_client:
+        _notify_decision(
+            post,
+            user,
+            workspace,
+            EventType.POST_APPROVED,
             title="Post approved",
             body=f'Your post "{post.caption_snippet}" was approved by {user.display_name}.',
-            data={
-                "post_id": str(post.id),
-                "workspace_id": str(workspace.id),
-            },
         )
 
     return post
@@ -212,17 +219,14 @@ def request_changes(target, user, workspace, comment):
             for pp in moved:
                 _record_action(post, pp, user, ApprovalAction.ActionType.CHANGES_REQUESTED, comment)
 
-    if post.author and post.author != user:
-        notify(
-            user=post.author,
-            event_type=EventType.POST_CHANGES_REQUESTED,
-            title="Changes requested on your post",
-            body=f'{user.display_name} requested changes: "{comment[:100]}"',
-            data={
-                "post_id": str(post.id),
-                "workspace_id": str(workspace.id),
-            },
-        )
+    _notify_decision(
+        post,
+        user,
+        workspace,
+        EventType.POST_CHANGES_REQUESTED,
+        title="Changes requested on your post",
+        body=f'{user.display_name} requested changes: "{comment[:100]}"',
+    )
 
     return post
 
@@ -248,17 +252,14 @@ def reject_post(target, user, workspace, comment):
             for pp in moved:
                 _record_action(post, pp, user, ApprovalAction.ActionType.REJECTED, comment)
 
-    if post.author and post.author != user:
-        notify(
-            user=post.author,
-            event_type=EventType.POST_REJECTED,
-            title="Post rejected",
-            body=f'{user.display_name} rejected your post: "{comment[:100]}"',
-            data={
-                "post_id": str(post.id),
-                "workspace_id": str(workspace.id),
-            },
-        )
+    _notify_decision(
+        post,
+        user,
+        workspace,
+        EventType.POST_REJECTED,
+        title="Post rejected",
+        body=f'{user.display_name} rejected your post: "{comment[:100]}"',
+    )
 
     return post
 

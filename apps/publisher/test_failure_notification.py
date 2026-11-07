@@ -8,10 +8,12 @@ The existing coverage in ``test_publish_confirmation.py`` asserts
 the fan-out went unnoticed.
 """
 
+import json
 from datetime import timedelta
+from unittest.mock import Mock, patch
 
 from django.core import mail
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.utils import timezone
 
 from apps.accounts.models import User
@@ -223,3 +225,33 @@ class PublishedNotificationTest(TestCase):
         PublishEngine()._mark_confirmed_published(pp, "urn:li:share:1")
 
         self.assertEqual(Notification.objects.count(), 0)
+
+    def _webhook_events(self, action):
+        with (
+            override_settings(NOTIFICATION_WEBHOOK_URL="https://n8n.example.com/webhook/bb"),
+            patch("socket.getaddrinfo", return_value=[(0, 0, 0, "", ("8.8.8.8", 0))]),
+            patch("httpx.post", return_value=Mock(status_code=200)) as httpx_post,
+        ):
+            action()
+        return [json.loads(c.kwargs["content"]) for c in httpx_post.call_args_list]
+
+    def test_published_reaches_the_webhook_once(self):
+        sent = self._webhook_events(lambda: PublishEngine()._mark_confirmed_published(self.pp, "urn:li:share:1"))
+        self.assertEqual(
+            [(s["event_type"], s["data"]["post_id"]) for s in sent], [("post_published", str(self.post.id))]
+        )
+
+    def test_failed_reaches_the_webhook_once(self):
+        sent = self._webhook_events(lambda: PublishEngine()._fail_permanently(self.pp, "boom", user_message="No."))
+        self.assertEqual(
+            [(s["event_type"], s["data"]["platform_post_id"]) for s in sent], [("post_failed", str(self.pp.id))]
+        )
+
+    def test_an_authorless_post_still_reaches_the_webhook(self):
+        self.post.author = None
+        self.post.save(update_fields=["author"])
+        pp = PlatformPost.objects.get(pk=self.pp.pk)
+
+        sent = self._webhook_events(lambda: PublishEngine()._mark_confirmed_published(pp, "urn:li:share:1"))
+
+        self.assertEqual([s["event_type"] for s in sent], ["post_published"])

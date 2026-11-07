@@ -1,4 +1,5 @@
 import datetime
+import json
 from unittest.mock import Mock, patch
 
 import pytest
@@ -363,3 +364,81 @@ class TestWebhookTargetFromSettings:
         ):
             _dispatch_webhook(self._delivery(user))
         httpx_post.assert_not_called()
+
+
+@pytest.mark.django_db
+class TestWebhookFeed:
+    """WEBHOOK_FEED_EVENTS reach NOTIFICATION_WEBHOOK_URL once per event, for
+    every post, instead of through the per-user Webhook channel."""
+
+    URL = "https://n8n.example.com/webhook/bb"
+
+    def _patched(self, status_code=200):
+        return (
+            patch("socket.getaddrinfo", return_value=[(0, 0, 0, "", ("8.8.8.8", 0))]),
+            patch("httpx.post", return_value=Mock(status_code=status_code)),
+        )
+
+    def test_sends_one_post_with_token_and_no_user(self, settings):
+        from apps.notifications.engine import notify_webhook
+
+        settings.NOTIFICATION_WEBHOOK_URL = self.URL
+        settings.NOTIFICATION_WEBHOOK_TOKEN = "tok"
+        dns, post = self._patched()
+        with dns, post as httpx_post:
+            n = notify_webhook(EventType.POST_APPROVED, "Post approved", data={"post_id": "p1"})
+
+        assert n.user is None
+        httpx_post.assert_called_once()
+        assert httpx_post.call_args.args[0] == self.URL
+        assert httpx_post.call_args.kwargs["headers"]["X-Webhook-Token"] == "tok"
+        payload = json.loads(httpx_post.call_args.kwargs["content"])
+        assert payload["event_type"] == "post_approved"
+        assert payload["data"] == {"post_id": "p1"}
+        assert payload["user_id"] is None
+        assert NotificationDelivery.objects.get(notification=n).status == DeliveryStatus.DELIVERED
+
+    def test_nothing_without_a_url(self, settings):
+        from apps.notifications.engine import notify_webhook
+
+        settings.NOTIFICATION_WEBHOOK_URL = ""
+        with patch("httpx.post") as httpx_post:
+            assert notify_webhook(EventType.POST_APPROVED, "Post approved") is None
+        httpx_post.assert_not_called()
+        assert not Notification.objects.exists()
+
+    def test_a_failed_send_is_retried(self, settings):
+        from apps.notifications.engine import notify_webhook, retry_failed_deliveries
+
+        settings.NOTIFICATION_WEBHOOK_URL = self.URL
+        dns, post = self._patched(status_code=500)
+        with dns, post:
+            n = notify_webhook(EventType.POST_FAILED, "failed")
+        delivery = NotificationDelivery.objects.get(notification=n)
+        assert delivery.status == DeliveryStatus.PENDING
+        assert delivery.next_retry_at is not None
+
+        NotificationDelivery.objects.filter(pk=delivery.pk).update(next_retry_at=timezone.now())
+        dns, post = self._patched()
+        with dns, post as httpx_post:
+            assert retry_failed_deliveries() == 1
+        httpx_post.assert_called_once()
+        delivery.refresh_from_db()
+        assert delivery.status == DeliveryStatus.DELIVERED
+
+    def test_the_per_user_channel_stays_quiet_for_feed_events(self, user, settings):
+        settings.NOTIFICATION_WEBHOOK_URL = self.URL
+        NotificationPreference.objects.create(
+            user=user, event_type=EventType.POST_APPROVED, channel=Channel.WEBHOOK, is_enabled=True
+        )
+        NotificationPreference.objects.create(
+            user=user, event_type=EventType.POST_SUBMITTED, channel=Channel.WEBHOOK, is_enabled=True
+        )
+        dns, post = self._patched()
+        with dns, post as httpx_post:
+            notify(user, EventType.POST_APPROVED, "Approved")
+            notify(user, EventType.POST_SUBMITTED, "Submitted")
+
+        # Only the event outside the feed goes out through the user's channel.
+        httpx_post.assert_called_once()
+        assert json.loads(httpx_post.call_args.kwargs["content"])["event_type"] == "post_submitted"
