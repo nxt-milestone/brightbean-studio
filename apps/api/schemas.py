@@ -494,6 +494,10 @@ class IdeaRequest(Schema):
     media_asset_ids: list[uuid.UUID] | None = Field(
         None, description="Replaces the attachments, in order; the first is the card's cover. ``[]`` removes all."
     )
+    post_id: uuid.UUID | None = Field(
+        None,
+        description="Link the post made from this idea (one post per idea). The post must be visible to the key.",
+    )
 
 
 class CreateIdeaRequest(IdeaRequest):

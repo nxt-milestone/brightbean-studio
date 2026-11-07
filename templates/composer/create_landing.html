@@ -672,7 +672,7 @@
                 <!-- Body -->
                 <div class="idea-modal-body" @click="createGroupDropdownOpen = false; createTagDropdownOpen = false">
                     <input type="text" name="title" required class="idea-title-input" placeholder="Give your idea a title">
-                    <textarea name="description" class="idea-desc-input" placeholder="Let it flow... or"></textarea>
+                    <textarea name="description" class="idea-desc-input" placeholder="Let it flow... or">{{ idea_description_template }}</textarea>
                     <input type="file" name="media" x-ref="ideaFileInput" accept="image/*,video/*,.gif" style="display:none" multiple
                            @change="_handleFileSelect($event)">
 

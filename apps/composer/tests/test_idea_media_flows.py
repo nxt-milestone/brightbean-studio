@@ -359,7 +359,7 @@ class IdeaMediaFlowsTests(TestCase):
         # status defaults to "draft".
         self.assertEqual(post.status, "draft")
         self.assertEqual(post.title, idea.title)
-        self.assertEqual(post.caption, idea.description)
+        self.assertEqual(post.caption, "")  # the description is the brief, not post text
         self.assertEqual(post.tags, idea.tags)
         self.assertEqual(idea.post_id, post.id)
 

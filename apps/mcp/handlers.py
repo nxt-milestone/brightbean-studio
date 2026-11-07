@@ -1820,7 +1820,7 @@ register_tool(
 # ---------------------------------------------------------------------------
 
 
-_IDEA_FIELDS = ("title", "description", "tags", "group_id", "media_asset_ids")
+_IDEA_FIELDS = ("title", "description", "tags", "group_id", "media_asset_ids", "post_id")
 
 
 def _idea_payload(args: dict) -> dict:
@@ -1865,6 +1865,11 @@ _IDEA_PROPS = {
         "type": "array",
         "items": {"type": "string", "format": "uuid"},
         "description": "Replaces the attachments in order; the first is the cover. [] removes all.",
+    },
+    "post_id": {
+        "type": "string",
+        "format": "uuid",
+        "description": "Link the post made from this idea (one post per idea; must be visible to the key).",
     },
 }
 
@@ -1949,6 +1954,7 @@ def _create_idea(args: dict, context: dict[str, Any]) -> dict:
         idea = save_idea(
             context["workspace"],
             author=api_key.issued_by if api_key.issued_by_id else None,
+            api_key=api_key,
             **_idea_payload(args),
         )
     except ValueError as exc:
@@ -1982,7 +1988,7 @@ def _update_idea(args: dict, context: dict[str, Any]) -> dict:
         raise JsonRpcError(INVALID_PARAMS, "idea_id is required")
     idea = _get_idea_for_workspace(context, args["idea_id"])
     try:
-        idea = save_idea(context["workspace"], idea, **_idea_payload(args))
+        idea = save_idea(context["workspace"], idea, api_key=context["api_key"], **_idea_payload(args))
     except ValueError as exc:
         raise JsonRpcError(INVALID_PARAMS, str(exc)) from exc
     return _wrap_text(_serialize_idea(idea))

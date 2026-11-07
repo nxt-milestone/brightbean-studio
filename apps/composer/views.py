@@ -3037,7 +3037,8 @@ def idea_create_post(request, workspace_id, idea_id):
             workspace=workspace,
             author=request.user,
             title=idea.title or "",
-            caption=idea.description or "",
+            # The idea's description is the brief (headings, analysis), not post text; it stays on the idea.
+            caption="",
             tags=tags,
         )
 
