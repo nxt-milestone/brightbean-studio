@@ -521,7 +521,7 @@ def update(request, post_id: uuid.UUID, payload: UpdatePostRequest):
     return _post_to_response(request, post)
 
 
-@router.post("/{post_id}/schedule", response=PostResponse, summary="Schedule a draft")
+@router.post("/{post_id}/schedule", response=PostResponse, summary="Schedule a draft or approved post")
 def schedule(request, post_id: uuid.UUID, payload: ScheduleRequest):
     enforce_http_rate_limits(request, is_write=True)
     # Same ``publish_directly`` contract as the create-with-schedule
@@ -531,12 +531,13 @@ def schedule(request, post_id: uuid.UUID, payload: ScheduleRequest):
     _require_perm(request, "publish_directly")
     post = _get_workspace_post(request, post_id)
 
-    # Schedule every draft child; a single-account key produces one child,
-    # but defensively we apply the transition to all draft children so we
-    # don't half-schedule.
-    drafts = list(post.platform_posts.filter(status="draft"))
+    # Schedule every draft or approved child; a single-account key produces
+    # one child, but defensively we apply the transition to all of them so we
+    # don't half-schedule. Drafts still hit the workspace approval gate in
+    # ``transition_platform_post``; approved children have passed it.
+    drafts = list(post.platform_posts.filter(status__in=("draft", "approved")))
     if not drafts:
-        raise HttpError(409, "No draft platform posts to schedule.")
+        raise HttpError(409, "No draft or approved platform posts to schedule.")
 
     # Quota check is per-account, so we evaluate it once per child before
     # we touch any state. Doing the checks first means an over-quota
