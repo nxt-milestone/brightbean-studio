@@ -77,6 +77,8 @@ INSTAGRAM_MEDIA_INSIGHTS = [
     "shares",
     "total_interactions",
 ]
+# Reels only; lands in PostMetrics.extra["raw_insights"].
+INSTAGRAM_REELS_INSIGHTS = ["ig_reels_avg_watch_time"]
 INSTAGRAM_MEDIA_FIELDS = [
     "id",
     "caption",
@@ -89,6 +91,10 @@ INSTAGRAM_MEDIA_FIELDS = [
     "like_count",
     "comments_count",
 ]
+
+# A post with this tag gets Meta's "AI info" label (``is_ai_generated``).
+# shortcut: the tag name is fixed, make it a setting when someone needs another one.
+AI_GENERATED_TAG = "ki-generiert"
 
 # Polling settings for container status checks
 CONTAINER_POLL_INTERVAL = 2  # seconds
@@ -335,8 +341,31 @@ class InstagramProvider(SocialProvider):
         # A carousel needs 2-10 children; with a single item Meta rejects the
         # parent container, so publish it as an ordinary single post instead.
         if content.post_type == PostType.CAROUSEL and len(content.media_urls) > 1:
-            return self._publish_carousel(access_token, ig_user_id, content)
-        return self._publish_single(access_token, ig_user_id, content)
+            result = self._publish_carousel(access_token, ig_user_id, content)
+        else:
+            result = self._publish_single(access_token, ig_user_id, content)
+        if _is_ai_generated(content):
+            # Stored in the post's platform_extra, so a reviewer can see Meta set the label.
+            result.extra["is_ai_generated"] = self._read_ai_label(access_token, result.platform_post_id)
+        return result
+
+    def _read_ai_label(self, access_token: str, media_id: str) -> bool | None:
+        """Meta's own ``is_ai_generated`` on the published media; None when unreadable.
+
+        The post is already live here, so a failed read must not fail the publish.
+        """
+        try:
+            data = self._request(
+                "GET",
+                f"{BASE_URL}/{media_id}",
+                access_token=access_token,
+                params={"fields": "is_ai_generated"},
+            ).json()
+        except APIError as exc:
+            logger.warning("Instagram AI label unreadable for %s: %s", media_id, exc)
+            return None
+        value = data.get("is_ai_generated")
+        return value if isinstance(value, bool) else None
 
     def _publish_single(self, access_token: str, ig_user_id: str, content: PublishContent) -> PublishResult:
         """Publish a single image, reel, or story."""
@@ -365,6 +394,9 @@ class InstagramProvider(SocialProvider):
             payload["video_url"] = url
         else:
             payload["image_url"] = url
+
+        if _is_ai_generated(content):
+            payload["is_ai_generated"] = True
 
         # Step 1: create container
         container_id = self._create_container(access_token, ig_user_id, payload)
@@ -400,6 +432,9 @@ class InstagramProvider(SocialProvider):
         }
         if content.text:
             carousel_payload["caption"] = content.text
+        # On the carousel container only: Meta does not take it on children.
+        if _is_ai_generated(content):
+            carousel_payload["is_ai_generated"] = True
 
         carousel_id = self._create_container(access_token, ig_user_id, carousel_payload)
         self._wait_for_container(access_token, carousel_id)
@@ -510,12 +545,15 @@ class InstagramProvider(SocialProvider):
 
     def get_post_metrics(self, access_token: str, post_id: str) -> PostMetrics:
         fields = self._get_media_fields(access_token, post_id)
+        metrics = INSTAGRAM_MEDIA_INSIGHTS
+        if fields.get("media_product_type") == "REELS":
+            metrics = [*metrics, *INSTAGRAM_REELS_INSIGHTS]
         values, errors = fetch_insights_safe(
             self._request,
             platform=self.platform_name,
             endpoint=f"{BASE_URL}/{post_id}/insights",
             access_token=access_token,
-            metrics=INSTAGRAM_MEDIA_INSIGHTS,
+            metrics=metrics,
             endpoint_type="media",
             require_success=True,
         )
@@ -890,3 +928,8 @@ class InstagramProvider(SocialProvider):
         except APIError as exc:
             logger.debug("Instagram media fields unavailable for %s: %s", media_id, exc)
             return {}
+
+
+def _is_ai_generated(content: PublishContent) -> bool:
+    tags = content.extra.get("tags") or []
+    return any(str(tag).strip().casefold() == AI_GENERATED_TAG for tag in tags)

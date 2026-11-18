@@ -1266,3 +1266,157 @@ def test_video_is_a_declared_post_type(provider_cls):
     """An explicit post_type hint can still hand the provider VIDEO, so the
     declared contract has to admit it."""
     assert PostType.VIDEO in provider_cls(IG_CREDS).supported_post_types
+
+
+# Meta's AI label (is_ai_generated)
+# ----------------------------------------------------------------------
+
+AI_TAGS = {"ig_user_id": "ig-1", "tags": ["Pillar 1", "ki-generiert"]}
+
+
+def _publish_labelled(provider, readback, **kwargs):
+    provider._request = MagicMock(
+        side_effect=[
+            _resp({"id": "container-1"}),
+            _resp({"status_code": "FINISHED"}),
+            _resp({"id": "media-1"}),
+            readback,
+        ]
+    )
+    return provider.publish_post("token", PublishContent(extra=AI_TAGS, **kwargs))
+
+
+@pytest.mark.parametrize("post_type", [PostType.IMAGE, PostType.REEL, PostType.STORY])
+def test_a_post_tagged_ki_generiert_carries_the_ai_label_and_reads_it_back(post_type):
+    provider = InstagramProvider(IG_CREDS)
+    url = IMAGE_URL if post_type == PostType.IMAGE else VIDEO_URL
+
+    result = _publish_labelled(
+        provider, _resp({"is_ai_generated": True, "id": "media-1"}), media_urls=[url], post_type=post_type
+    )
+
+    assert provider._request.call_args_list[0].kwargs["json"]["is_ai_generated"] is True
+    readback = provider._request.call_args_list[3]
+    assert readback.args == ("GET", "https://graph.facebook.com/v25.0/media-1")
+    assert readback.kwargs["params"] == {"fields": "is_ai_generated"}
+    assert result.extra["is_ai_generated"] is True
+
+
+def test_a_post_without_the_tag_gets_no_label_and_no_readback():
+    provider = InstagramProvider(IG_CREDS)
+
+    result = _publish(
+        provider,
+        media_urls=[IMAGE_URL],
+        post_type=PostType.IMAGE,
+        extra={"ig_user_id": "ig-1", "tags": ["ki-redaktion"]},
+    )
+
+    assert "is_ai_generated" not in provider._request.call_args_list[0].kwargs["json"]
+    assert provider._request.call_count == 3
+    assert "is_ai_generated" not in result.extra
+
+
+def test_a_tagged_carousel_labels_the_carousel_container_only():
+    provider = InstagramProvider(IG_CREDS)
+    provider._request = MagicMock(
+        side_effect=[
+            _resp({"id": "child-1"}),
+            _resp({"status_code": "FINISHED"}),
+            _resp({"id": "child-2"}),
+            _resp({"status_code": "FINISHED"}),
+            _resp({"id": "carousel-1"}),
+            _resp({"status_code": "FINISHED"}),
+            _resp({"id": "media-1"}),
+            _resp({"is_ai_generated": True}),
+        ]
+    )
+
+    result = provider.publish_post(
+        "token",
+        PublishContent(media_urls=[IMAGE_URL, VIDEO_URL], post_type=PostType.CAROUSEL, extra=AI_TAGS),
+    )
+
+    calls = provider._request.call_args_list
+    assert "is_ai_generated" not in calls[0].kwargs["json"]
+    assert "is_ai_generated" not in calls[2].kwargs["json"]
+    assert calls[4].kwargs["json"]["media_type"] == "CAROUSEL"
+    assert calls[4].kwargs["json"]["is_ai_generated"] is True
+    assert result.extra["is_ai_generated"] is True
+
+
+@pytest.mark.parametrize(
+    "readback",
+    [
+        APIError("(#100) Tried accessing nonexisting field (is_ai_generated)", status_code=400, platform="Instagram"),
+        _resp({"id": "media-1"}),
+    ],
+    ids=["read-fails", "field-missing"],
+)
+def test_an_unreadable_ai_label_is_stored_as_none_and_the_post_stays_published(readback):
+    """The media is live by the time we read; a failed read must not turn into a failed (and retried) publish."""
+    provider = InstagramProvider(IG_CREDS)
+
+    result = _publish_labelled(provider, readback, media_urls=[IMAGE_URL], post_type=PostType.IMAGE)
+
+    assert result.platform_post_id == "media-1"
+    assert result.extra["is_ai_generated"] is None
+
+
+def test_the_api_shows_the_ai_label_read_back_into_platform_extra():
+    from types import SimpleNamespace
+
+    from apps.api.schemas import PlatformPostSummary
+
+    def child(platform_extra):
+        return SimpleNamespace(
+            id="00000000-0000-0000-0000-000000000001",
+            social_account_id="00000000-0000-0000-0000-000000000002",
+            social_account=SimpleNamespace(platform="instagram"),
+            status="published",
+            scheduled_at=None,
+            published_at=None,
+            platform_post_id="media-1",
+            publish_error="",
+            platform_extra=platform_extra,
+        )
+
+    assert PlatformPostSummary.from_platform_post(child({"is_ai_generated": True})).is_ai_generated is True
+    assert PlatformPostSummary.from_platform_post(child({"is_ai_generated": False})).is_ai_generated is False
+    assert PlatformPostSummary.from_platform_post(child(None)).is_ai_generated is None
+
+
+# Reel watch time
+# ----------------------------------------------------------------------
+
+
+def _metrics_for(media_product_type):
+    provider = InstagramProvider({"client_id": "id", "client_secret": "secret"})
+
+    def request(method, url, **kwargs):
+        if url.endswith("/insights"):
+            metric = kwargs["params"]["metric"]
+            return _resp({"data": [{"name": metric, "period": "lifetime", "values": [{"value": 7}]}]})
+        return _resp({"id": "ig-media-1", "media_product_type": media_product_type})
+
+    provider._request = MagicMock(side_effect=request)
+    metrics = provider.get_post_metrics("page-token", "ig-media-1")
+    asked = [c.kwargs["params"]["metric"] for c in provider._request.call_args_list if c.args[1].endswith("/insights")]
+    return metrics, asked
+
+
+def test_a_reel_reads_its_average_watch_time():
+    metrics, asked = _metrics_for("REELS")
+
+    assert "ig_reels_avg_watch_time" in asked
+    assert metrics.extra["raw_insights"]["ig_reels_avg_watch_time"] == 7
+    assert metrics.video_views == 7
+
+
+@pytest.mark.parametrize("media_product_type", ["FEED", "STORY", None])
+def test_images_and_carousels_do_not_ask_for_reel_watch_time(media_product_type):
+    metrics, asked = _metrics_for(media_product_type)
+
+    assert "ig_reels_avg_watch_time" not in asked
+    assert "ig_reels_avg_watch_time" not in metrics.extra["raw_insights"]
+    assert metrics.extra["insight_errors"] == {}

@@ -303,6 +303,13 @@ class PlatformPostSummary(Schema):
     published_at: dt.datetime | None
     platform_post_id: str = ""
     publish_error: str = ""
+    is_ai_generated: bool | None = Field(
+        None,
+        description=(
+            "Instagram only: Meta's AI label on the published media, read back after publishing a post tagged "
+            "``ki-generiert``. ``null`` when not asked for or not readable."
+        ),
+    )
 
     @field_serializer("scheduled_at", "published_at")
     def _serialize_dt(self, value: dt.datetime | None) -> str | None:
@@ -319,6 +326,7 @@ class PlatformPostSummary(Schema):
             published_at=pp.published_at,
             platform_post_id=pp.platform_post_id or "",
             publish_error=pp.publish_error or "",
+            is_ai_generated=(pp.platform_extra or {}).get("is_ai_generated"),
         )
 
 
