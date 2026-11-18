@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, nxt]
   pull_request:
-    branches: [main]
+    branches: [main, nxt]
 
 # Principle of least privilege: default to read-only for every job.
 # Individual jobs can opt into more permissions if needed.
