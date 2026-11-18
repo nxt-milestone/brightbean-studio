@@ -425,7 +425,7 @@ class PostResponse(Schema):
             proposed_publish_at=post.proposed_publish_at,
             status=post.status,
             tags=list(post.tags or []),
-            category=post.category.name if post.category_id else None,
+            category=post.category.name if post.category else None,
             platform_posts=platform_posts,
             approval_history=[ApprovalActionSummary.from_action(a) for a in actions],
             created_at=post.created_at,

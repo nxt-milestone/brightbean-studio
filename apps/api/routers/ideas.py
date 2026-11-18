@@ -124,7 +124,10 @@ def save_idea(
         post = visible_posts_qs(api_key).filter(id=post_id).first() if api_key is not None else None
         if post is None:
             raise ValueError(f"Post {post_id} not found.")
-        if Idea.objects.filter(post=post).exclude(id=getattr(idea, "id", None)).exists():
+        linked = Idea.objects.filter(post=post)
+        if idea is not None:
+            linked = linked.exclude(id=idea.id)
+        if linked.exists():
             raise ValueError(f"Post {post_id} is already linked to another idea.")
 
     with transaction.atomic():
