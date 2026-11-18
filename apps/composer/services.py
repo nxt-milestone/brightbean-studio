@@ -148,6 +148,7 @@ def create_post(
     platform_overrides: dict[Any, dict[str, str | None]] | None = None,
     tags: list[str] | None = None,
     category=None,
+    instagram: dict | None = None,
 ):
     """Create a ``Post`` + one ``PlatformPost`` for ``social_account``.
 
@@ -178,6 +179,8 @@ def create_post(
       media library.
     * ``tags`` must already be normalized; ``category`` is a
       ``ContentCategory`` of the same workspace (see ``resolve_category``).
+    * ``instagram`` is Reel music/cover, checked by ``instagram_reel_options``
+      and stored in the child's ``platform_extra["instagram"]``.
 
     Returns the persisted ``Post`` with one ``PlatformPost`` child.
     """
@@ -251,6 +254,11 @@ def create_post(
             raise ValueError(reason)
 
     override = (platform_overrides or {}).get(social_account.id) or {}
+    reel = instagram_reel_options(
+        social_account,
+        instagram or {},
+        media_types=[asset_map[u].media_type for _, u in resolved if u is not None and asset_map[u].file],
+    )
 
     with transaction.atomic():
         post = Post.objects.create(
@@ -281,6 +289,7 @@ def create_post(
             platform_specific_title=override.get("title"),
             platform_specific_caption=override.get("caption"),
             platform_specific_first_comment=override.get("first_comment"),
+            platform_extra={"instagram": reel} if reel else {},
         )
         for position, (_mid, u) in enumerate(resolved):
             # ``u`` is validated non-None and present in ``asset_map`` above
@@ -574,3 +583,76 @@ def media_change_blocker(post, *, media_types_after) -> str:
                 f"Keep one on the post, or unschedule it for {platform} first."
             )
     return ""
+
+
+# ---------------------------------------------------------------------------
+# Instagram Reels: music and cover (``platform_extra["instagram"]``)
+# ---------------------------------------------------------------------------
+
+
+def instagram_reel_options(social_account, options: dict, *, media_types: list[str]) -> dict:
+    """Check Reel music/cover ``options`` for ``social_account``; returns what to store.
+
+    ``media_types`` is the post's usable media in order. Only a post that goes
+    out as a Reel takes them — a single video on an Instagram account connected
+    through Facebook Login — because Meta silently ignores parameters a
+    container does not use. Empty options always pass (nothing to store).
+    Raises ``ValueError`` with a sentence for the caller.
+    """
+    from apps.media_library.models import MediaAsset
+
+    options = {k: v for k, v in options.items() if v is not None}
+    if not options:
+        return {}
+    if social_account.platform == "instagram_login":
+        raise ValueError(
+            "Music and covers need the Instagram account connected through Facebook Login: "
+            "Meta's Audio API is not available to Instagram Login accounts."
+        )
+    if social_account.platform != "instagram":
+        raise ValueError("`instagram` (music and cover) is for Instagram accounts only.")
+    if media_types != [MediaAsset.MediaType.VIDEO]:
+        raise ValueError(
+            "Music and covers go on Instagram Reels only: the post needs exactly one video and no other media."
+        )
+    if "cover_media_id" in options:
+        cover = MediaAsset.objects.filter(
+            id=options["cover_media_id"], workspace_id=social_account.workspace_id
+        ).first()
+        # Meta fetches the cover itself and takes JPEG.
+        if cover is None or not cover.file or cover.mime_type != "image/jpeg":
+            raise ValueError("cover_media_id must be a JPEG image in this workspace's media library.")
+        options["cover_media_id"] = str(cover.id)
+    return options
+
+
+def set_instagram_options(post, options: dict | None, *, media_types: list[str] | None = None) -> bool:
+    """Store Reel music/cover on ``post``'s children; ``{}`` clears them.
+
+    ``options=None`` keeps what is stored but checks it again against
+    ``media_types`` (the post's media after a change; defaults to its current
+    media). Every child is checked before any is written. Returns whether
+    anything changed, so an approved post can go back to review.
+    """
+    if media_types is None:
+        media_types = list(
+            _usable_attachments()
+            .filter(post_id=post.pk)
+            .order_by("position")
+            .values_list("media_asset__media_type", flat=True)
+        )
+    changes = []
+    for pp in post.platform_posts.select_related("social_account"):
+        current = (pp.platform_extra or {}).get("instagram") or {}
+        wanted = instagram_reel_options(
+            pp.social_account, current if options is None else options, media_types=media_types
+        )
+        if wanted != current:
+            changes.append((pp, wanted))
+    for pp, wanted in changes:
+        extra = {k: v for k, v in (pp.platform_extra or {}).items() if k != "instagram"}
+        if wanted:
+            extra["instagram"] = wanted
+        pp.platform_extra = extra
+        pp.save(update_fields=["platform_extra", "updated_at"])
+    return bool(changes)

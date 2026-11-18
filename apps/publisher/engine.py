@@ -864,6 +864,18 @@ class PublishEngine:
                 except MediaAsset.DoesNotExist:
                     logger.warning("Cover image asset %s not found", cover_asset_id)
 
+            # Instagram Reel cover: Meta fetches it from a public URL, like the video.
+            reel_cover_id = (extra.get("instagram") or {}).get("cover_media_id")
+            if platform == "instagram" and reel_cover_id:
+                from apps.media_library.models import MediaAsset
+
+                reel_cover = MediaAsset.objects.filter(id=reel_cover_id).first()
+                if reel_cover and reel_cover.file:
+                    url = reel_cover.file.url
+                    extra["cover_url"] = f"{app_url}{url}" if url.startswith("/") else url
+                else:
+                    logger.warning("Reel cover asset %s not found", reel_cover_id)
+
             post_type = self._resolve_post_type(
                 platform=platform,
                 platform_extra=platform_extra,

@@ -6,6 +6,7 @@ uses the Facebook OAuth flow with Instagram-specific scopes.
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from datetime import datetime
@@ -95,6 +96,19 @@ INSTAGRAM_MEDIA_FIELDS = [
 # A post with this tag gets Meta's "AI info" label (``is_ai_generated``).
 # shortcut: the tag name is fixed, make it a setting when someone needs another one.
 AI_GENERATED_TAG = "ki-generiert"
+
+# What Meta's Audio API (``/ig_audio``) returns per track; passed through as is.
+INSTAGRAM_AUDIO_FIELDS = [
+    "audio_id",
+    "title",
+    "display_artist",
+    "duration_in_ms",
+    "audio_type",
+    "download_url",
+    "cover_artwork_thumbnail_uri",
+    "ig_username",
+    "on_platform_audio_preview_link",
+]
 
 # Polling settings for container status checks
 CONTAINER_POLL_INTERVAL = 2  # seconds
@@ -344,28 +358,33 @@ class InstagramProvider(SocialProvider):
             result = self._publish_carousel(access_token, ig_user_id, content)
         else:
             result = self._publish_single(access_token, ig_user_id, content)
+        # Stored in the post's platform_extra, so a reviewer can see what Meta made of it.
+        readback: dict[str, type] = {}
         if _is_ai_generated(content):
-            # Stored in the post's platform_extra, so a reviewer can see Meta set the label.
-            result.extra["is_ai_generated"] = self._read_ai_label(access_token, result.platform_post_id)
+            readback["is_ai_generated"] = bool
+        if _reel_options(content).get("audio_id"):
+            readback["media_audio_type"] = str
+        if readback:
+            result.extra.update(self._read_back(access_token, result.platform_post_id, readback))
         return result
 
-    def _read_ai_label(self, access_token: str, media_id: str) -> bool | None:
-        """Meta's own ``is_ai_generated`` on the published media; None when unreadable.
+    def _read_back(self, access_token: str, media_id: str, fields: dict[str, type]) -> dict:
+        """Meta's own value of each field on the published media; None when unreadable.
 
-        The post is already live here, so a failed read must not fail the publish.
+        ``fields`` maps a field to the type it must have. The post is already
+        live here, so a failed read must not fail the publish.
         """
         try:
             data = self._request(
                 "GET",
                 f"{BASE_URL}/{media_id}",
                 access_token=access_token,
-                params={"fields": "is_ai_generated"},
+                params={"fields": ",".join(fields)},
             ).json()
         except APIError as exc:
-            logger.warning("Instagram AI label unreadable for %s: %s", media_id, exc)
-            return None
-        value = data.get("is_ai_generated")
-        return value if isinstance(value, bool) else None
+            logger.warning("Instagram %s unreadable for %s: %s", ",".join(fields), media_id, exc)
+            data = {}
+        return {name: data.get(name) if isinstance(data.get(name), kind) else None for name, kind in fields.items()}
 
     def _publish_single(self, access_token: str, ig_user_id: str, content: PublishContent) -> PublishResult:
         """Publish a single image, reel, or story."""
@@ -397,6 +416,9 @@ class InstagramProvider(SocialProvider):
 
         if _is_ai_generated(content):
             payload["is_ai_generated"] = True
+        if _reel_options(content) and payload.get("media_type") != "REELS":
+            raise self._not_a_reel()
+        payload.update(self._reel_payload(content))
 
         # Step 1: create container
         container_id = self._create_container(access_token, ig_user_id, payload)
@@ -409,6 +431,8 @@ class InstagramProvider(SocialProvider):
 
     def _publish_carousel(self, access_token: str, ig_user_id: str, content: PublishContent) -> PublishResult:
         """Publish a carousel post with multiple media items."""
+        if _reel_options(content):
+            raise self._not_a_reel()
         child_ids: list[str] = []
 
         for index, url in enumerate(content.media_urls):
@@ -440,6 +464,33 @@ class InstagramProvider(SocialProvider):
         self._wait_for_container(access_token, carousel_id)
 
         return self._publish_container(access_token, ig_user_id, carousel_id)
+
+    @staticmethod
+    def _reel_payload(content: PublishContent) -> dict:
+        """Music and cover for a Reels container, from the post's ``instagram`` options.
+
+        ``cover_url`` is the cover asset's public URL, which the engine puts in
+        ``extra`` at publish time (a stored URL could be a presigned one that expired).
+        """
+        options = _reel_options(content)
+        payload: dict = {}
+        if options.get("audio_id"):
+            audio = {k: options[k] for k in ("audio_id", "audio_volume", "video_volume") if options.get(k)}
+            # Meta takes it as a JSON string, not as an object.
+            payload["audio_configuration"] = json.dumps(audio)
+        if options.get("thumb_offset") is not None:
+            payload["thumb_offset"] = options["thumb_offset"]
+        if options.get("cover_media_id") and content.extra.get("cover_url"):
+            payload["cover_url"] = content.extra["cover_url"]
+        return payload
+
+    def _not_a_reel(self) -> PublishError:
+        # Meta silently drops what a container doesn't use, so say it here instead.
+        return PublishError(
+            "Music and covers go on Instagram Reels only: this post is not a single video.",
+            platform=self.platform_name,
+            retryable=False,
+        )
 
     def _create_container(self, access_token: str, ig_user_id: str, payload: dict) -> str:
         resp = self._request(
@@ -917,6 +968,25 @@ class InstagramProvider(SocialProvider):
             logger.debug("Instagram profile fields unavailable for %s: %s", ig_user_id, exc)
             return None
 
+    def search_audio(
+        self, access_token: str, ig_user_id: str, *, audio_type: str = "music", query: str = "", after: str = ""
+    ) -> dict:
+        """Tracks from Instagram's library (Audio API); trending when ``query`` is empty.
+
+        Returns ``{"audio": [...], "after": cursor or None}`` with the
+        ``INSTAGRAM_AUDIO_FIELDS`` of each track.
+        """
+        params = {"audio_type": audio_type, "user_id": ig_user_id}
+        if query:
+            params["search_query"] = query
+        if after:
+            params["after"] = after
+        data = self._request("GET", f"{BASE_URL}/ig_audio", access_token=access_token, params=params).json()
+        return {
+            "audio": [{k: item[k] for k in INSTAGRAM_AUDIO_FIELDS if k in item} for item in data.get("audio") or []],
+            "after": ((data.get("paging") or {}).get("cursors") or {}).get("after"),
+        }
+
     def _get_media_fields(self, access_token: str, media_id: str) -> dict:
         try:
             return self._request(
@@ -933,3 +1003,7 @@ class InstagramProvider(SocialProvider):
 def _is_ai_generated(content: PublishContent) -> bool:
     tags = content.extra.get("tags") or []
     return any(str(tag).strip().casefold() == AI_GENERATED_TAG for tag in tags)
+
+
+def _reel_options(content: PublishContent) -> dict:
+    return content.extra.get("instagram") or {}

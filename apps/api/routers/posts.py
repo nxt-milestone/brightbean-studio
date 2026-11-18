@@ -53,6 +53,7 @@ from apps.composer.services import (
     media_change_blocker,
     resolve_category,
     revert_approved_to_review,
+    set_instagram_options,
     sync_post_scheduled_at,
     sync_workspace_tags,
     transition_platform_post,
@@ -325,6 +326,7 @@ def create(request, payload: CreatePostRequest):
             platform_overrides=platform_overrides,
             tags=tags,
             category=category,
+            instagram=payload.instagram.model_dump(mode="json", exclude_none=True) if payload.instagram else None,
         )
         body = _post_to_response(request, post)
         status_code = 201
@@ -455,6 +457,19 @@ def update(request, post_id: uuid.UUID, payload: UpdatePostRequest):
 
     with transaction.atomic():
         orig_content = base_content_snapshot(post)
+        # Checked against the media the post will have; a 422 here rolls the whole route back.
+        instagram_changed = False
+        if payload.instagram is not None or payload.media_asset_ids is not None:
+            try:
+                instagram_changed = set_instagram_options(
+                    post,
+                    None if payload.instagram is None else payload.instagram.model_dump(mode="json", exclude_none=True),
+                    media_types=None
+                    if payload.media_asset_ids is None
+                    else [resolved_assets[mid].media_type for mid in wanted_media if resolved_assets[mid].file],
+                )
+            except ValueError as exc:
+                raise HttpError(422, str(exc)) from exc
         update_fields: list[str] = []
         if tags is not None:
             post.tags = tags
@@ -511,7 +526,7 @@ def update(request, post_id: uuid.UUID, payload: UpdatePostRequest):
 
         # Same safety net as the composer: changed content or media on an
         # approved post sends it back to review instead of publishing unseen.
-        if payload.media_asset_ids is not None or base_content_snapshot(post) != orig_content:
+        if payload.media_asset_ids is not None or instagram_changed or base_content_snapshot(post) != orig_content:
             revert_approved_to_review(post)
 
         sync_post_scheduled_at(post)

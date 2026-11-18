@@ -855,6 +855,14 @@ def _json_referenced_asset_ids_postgres():
             referenced.add(_to_uuid(val))
 
         cursor.execute("""
+            SELECT DISTINCT platform_extra->'instagram'->>'cover_media_id'
+            FROM composer_platform_post
+            WHERE platform_extra->'instagram'->>'cover_media_id' IS NOT NULL
+        """)
+        for (val,) in cursor.fetchall():
+            referenced.add(_to_uuid(val))
+
+        cursor.execute("""
             SELECT DISTINCT elem::text
             FROM composer_platform_post,
                  jsonb_array_elements_text(platform_specific_media) AS elem
@@ -891,6 +899,8 @@ def _json_referenced_asset_ids_python():
             referenced.add(_to_uuid(extra["thumbnail_asset_id"]))
         if extra.get("cover_image_asset_id"):
             referenced.add(_to_uuid(extra["cover_image_asset_id"]))
+        if (extra.get("instagram") or {}).get("cover_media_id"):
+            referenced.add(_to_uuid(extra["instagram"]["cover_media_id"]))
 
     for pp in PlatformPost.objects.exclude(platform_specific_media=None).only("platform_specific_media"):
         if isinstance(pp.platform_specific_media, list):
