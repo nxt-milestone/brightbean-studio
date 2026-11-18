@@ -986,7 +986,7 @@ def test_a_failed_poll_still_counts_the_pages_it_bought(workspace, caplog):
 
 
 @pytest.mark.django_db
-def test_the_sweep_asks_for_the_window_since_the_last_sweep(workspace):
+def test_the_sweep_asks_for_the_window_since_the_last_sweep(workspace, settings):
     """Not the newest-message high-water mark, which would filter out its whole point.
 
     The sweep exists to find what the early exit missed — by definition older
@@ -995,7 +995,10 @@ def test_the_sweep_asks_for_the_window_since_the_last_sweep(workspace):
     sweep that costs everything and recovers nothing.
     """
     account = _youtube_account(workspace)
-    swept_at = timezone.now() - timedelta(days=8)
+    # In this month and due at once: a last sweep in an earlier month makes this the monthly full reply walk,
+    # whose ``since`` is that month's start (what ``now - 8 days`` hit on the 1st to 8th of every month).
+    settings.INBOX_DEEP_SWEEP_SECONDS = 0
+    swept_at = timezone.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     account.inbox_last_deep_sweep_at = swept_at
     account.save(update_fields=["inbox_last_deep_sweep_at"])
     # A message imported an hour ago, so the high-water mark is recent.
