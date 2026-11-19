@@ -314,6 +314,13 @@ class InstagramLoginProvider(SocialProvider):
                 platform=self.platform_name,
                 retryable=False,
             )
+        if content.extra.get("instagram"):
+            # Meta's Audio API needs Facebook Login; publishing here would silently drop the music.
+            raise PublishError(
+                "Music and covers need the Instagram account connected through Facebook Login.",
+                platform=self.platform_name,
+                retryable=False,
+            )
 
         if content.post_type == PostType.CAROUSEL and len(content.media_urls) > 1:
             return self._publish_carousel(access_token, content)

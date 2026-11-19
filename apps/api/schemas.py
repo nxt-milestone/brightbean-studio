@@ -16,7 +16,7 @@ import uuid
 from typing import TYPE_CHECKING, Literal
 
 from ninja import Field, Schema
-from pydantic import field_serializer
+from pydantic import ConfigDict, field_serializer, model_validator
 
 from providers import is_video_only, requires_media
 
@@ -137,12 +137,68 @@ class AccountsListResponse(Schema):
     accounts: list[AccountSummary]
 
 
+class InstagramAudioTrack(Schema):
+    """One entry of Meta's ``/ig_audio``, passed through as Meta names it."""
+
+    audio_id: str
+    title: str | None = None
+    display_artist: str | None = None
+    duration_in_ms: int | None = None
+    audio_type: str | None = None
+    download_url: str | None = Field(None, description="Temporary (about 1.5 days); for listening, not for storing.")
+    cover_artwork_thumbnail_uri: str | None = None
+    ig_username: str | None = None
+    on_platform_audio_preview_link: str | None = None
+
+
+class InstagramAudioResponse(Schema):
+    audio: list[InstagramAudioTrack]
+    after: str | None = Field(None, description="Cursor for the next page; pass it back as ``after``.")
+
+
 # ---------------------------------------------------------------------------
 # /posts — write
 # ---------------------------------------------------------------------------
 
 
 PostAction = Literal["draft", "schedule"]
+
+
+class InstagramReelOptions(Schema):
+    """Music and cover for an Instagram Reel.
+
+    Only for a post with exactly one video on an Instagram account connected
+    through Facebook Login (``platform: instagram``); refused with 422 otherwise.
+    Stored per channel in ``platform_extra["instagram"]``.
+    """
+
+    # A misspelt key would otherwise be dropped and the Reel go out without it.
+    model_config = ConfigDict(extra="forbid")
+
+    audio_id: str | None = Field(
+        None,
+        pattern=r"^[0-9]+$",
+        max_length=64,
+        description="Instagram library track, from ``GET /accounts/{id}/instagram/audio``.",
+    )
+    audio_volume: int | None = Field(None, ge=1, le=100, description="Music volume, 1-100 (Meta's default 100).")
+    video_volume: int | None = Field(
+        None, ge=1, le=100, description="Volume of the video's own sound under the music, 1-100 (Meta's default 100)."
+    )
+    thumb_offset: int | None = Field(
+        None,
+        ge=0,
+        description="Cover frame, in milliseconds into the video. Meta ignores it when a cover image is set.",
+    )
+    cover_media_id: uuid.UUID | None = Field(
+        None, description="A JPEG image in the workspace's media library to use as the Reel's cover."
+    )
+
+    @model_validator(mode="after")
+    def _volumes_need_music(self) -> InstagramReelOptions:
+        if (self.audio_volume or self.video_volume) and not self.audio_id:
+            raise ValueError("audio_volume and video_volume need an audio_id.")
+        return self
 
 
 class PlatformOverride(Schema):
@@ -249,6 +305,9 @@ class CreatePostRequest(Schema):
             "Empty for none. An unknown name is rejected with 422; categories are not created implicitly."
         ),
     )
+    instagram: InstagramReelOptions | None = Field(
+        None, description="Instagram Reels only: music from Instagram's library and a cover."
+    )
     idempotency_key: str | None = Field(
         None,
         max_length=128,
@@ -283,6 +342,13 @@ class UpdatePostRequest(Schema):
         max_length=100,
         description='Content category name. Omit (or send null) to leave it unchanged; ``""`` clears it.',
     )
+    instagram: InstagramReelOptions | None = Field(
+        None,
+        description=(
+            "Instagram Reels only: replaces the stored music/cover as a whole. Omit (or send null) to leave it "
+            "unchanged; ``{}`` clears it. Changing it on an approved post sends the post back to review."
+        ),
+    )
 
 
 class ScheduleRequest(Schema):
@@ -310,6 +376,14 @@ class PlatformPostSummary(Schema):
             "``ki-generiert``. ``null`` when not asked for or not readable."
         ),
     )
+    instagram: InstagramReelOptions | None = Field(None, description="Instagram Reels only: music and cover set.")
+    media_audio_type: str | None = Field(
+        None,
+        description=(
+            "Instagram only: ``MUSIC`` or ``ORIGINAL_SOUND`` as Meta reports it, read back after publishing "
+            "a Reel with music. ``null`` when not asked for or not readable."
+        ),
+    )
 
     @field_serializer("scheduled_at", "published_at")
     def _serialize_dt(self, value: dt.datetime | None) -> str | None:
@@ -327,6 +401,8 @@ class PlatformPostSummary(Schema):
             platform_post_id=pp.platform_post_id or "",
             publish_error=pp.publish_error or "",
             is_ai_generated=(pp.platform_extra or {}).get("is_ai_generated"),
+            instagram=(pp.platform_extra or {}).get("instagram"),
+            media_audio_type=(pp.platform_extra or {}).get("media_audio_type"),
         )
 
 

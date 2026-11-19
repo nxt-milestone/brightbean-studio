@@ -20,18 +20,21 @@ from typing import Any
 from uuid import UUID
 
 from ninja.errors import HttpError
+from pydantic import ValidationError
 
 from apps.analytics.api_builders import build_account_analytics, build_post_analytics
 from apps.api.limits import check_platform_quota
 from apps.api.pagination import decode_offset_cursor, encode_offset_cursor
+from apps.api.routers.accounts import search_instagram_audio
 from apps.api.routers.posts import filter_posts, parse_labels, submit_post, visible_comments
 from apps.api.routers.posts import visible_posts_qs as _visible_posts_qs
-from apps.api.schemas import PostCommentResponse, PostResponse
+from apps.api.schemas import InstagramReelOptions, PostCommentResponse, PostResponse
 from apps.composer.models import PlatformPost, Post
 from apps.composer.services import (
     base_content_snapshot,
     create_post,
     revert_approved_to_review,
+    set_instagram_options,
     sync_workspace_tags,
     transition_platform_post,
 )
@@ -46,6 +49,7 @@ from apps.inbox.services import (
 from apps.mcp.protocol import INVALID_PARAMS, JsonRpcError
 from apps.mcp.tools import Tool, register_tool
 from apps.social_accounts.models import SocialAccount
+from providers.exceptions import ProviderError
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -158,6 +162,44 @@ def _get_post_for_key(api_key, post_id_str: str) -> Post:
         raise JsonRpcError(INVALID_PARAMS, "Post not found") from exc
 
 
+def _parse_instagram(args: dict) -> dict | None:
+    """The ``instagram`` (Reel music/cover) arg checked like REST's; ``None`` when not sent."""
+    if args.get("instagram") is None:
+        return None
+    try:
+        return InstagramReelOptions.model_validate(args["instagram"]).model_dump(mode="json", exclude_none=True)
+    except ValidationError as exc:
+        problems = "; ".join(f"{'.'.join(map(str, e['loc'])) or 'instagram'}: {e['msg']}" for e in exc.errors())
+        raise JsonRpcError(INVALID_PARAMS, f"instagram: {problems}") from exc
+
+
+# Shared by create_draft and update_post.
+_INSTAGRAM_SCHEMA = {
+    "type": "object",
+    "description": (
+        "Instagram Reels only (exactly one video, account connected through Facebook Login): music from "
+        "Instagram's library and a cover. Refused for anything else."
+    ),
+    "properties": {
+        "audio_id": {"type": "string", "pattern": "^[0-9]+$", "description": "From search_instagram_audio."},
+        "audio_volume": {"type": "integer", "minimum": 1, "maximum": 100, "description": "Music volume."},
+        "video_volume": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100,
+            "description": "Volume of the video's own sound under the music.",
+        },
+        "thumb_offset": {"type": "integer", "minimum": 0, "description": "Cover frame, ms into the video."},
+        "cover_media_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "A JPEG image asset to use as the cover; wins over thumb_offset.",
+        },
+    },
+    "additionalProperties": False,
+}
+
+
 def _parse_iso_datetime(value: Any, field_name: str) -> datetime:
     if not isinstance(value, str):
         raise JsonRpcError(INVALID_PARAMS, f"{field_name} must be a string")
@@ -206,6 +248,54 @@ register_tool(
 
 
 # ---------------------------------------------------------------------------
+# Tool: search_instagram_audio
+# ---------------------------------------------------------------------------
+
+
+def _search_instagram_audio(args: dict, context: dict[str, Any]) -> dict:
+    # Same permission as REST: only useful for writing a post, and it spends the account's Meta budget.
+    _require_perm(context, "create_posts")
+    if "social_account_id" not in args:
+        raise JsonRpcError(INVALID_PARAMS, "social_account_id is required")
+    sa = _resolve_allowed_account(context["api_key"], args["social_account_id"])
+    try:
+        found = search_instagram_audio(
+            sa, query=args.get("query", ""), audio_type=args.get("type", "music"), after=args.get("after", "")
+        )
+    except ValueError as exc:
+        raise JsonRpcError(INVALID_PARAMS, str(exc)) from exc
+    except ProviderError as exc:
+        raise JsonRpcError(INVALID_PARAMS, f"Instagram refused the music search: {exc}") from exc
+    return _wrap_text(found.model_dump(mode="json"))
+
+
+register_tool(
+    Tool(
+        name="search_instagram_audio",
+        description=(
+            "Search Instagram's music library for a Reel (REST: GET /accounts/{id}/instagram/audio). "
+            "Without `query` it returns trending tracks. Use a result's audio_id as `instagram.audio_id` "
+            "on create_draft / update_post. download_url is temporary (about 1.5 days). Needs an Instagram "
+            "account connected through Facebook Login."
+        ),
+        input_schema={
+            "type": "object",
+            "properties": {
+                "social_account_id": {"type": "string", "format": "uuid"},
+                "query": {"type": "string", "maxLength": 100, "description": "Search words; empty for trending."},
+                "type": {"type": "string", "enum": ["music", "original_sound"], "default": "music"},
+                "after": {"type": "string", "maxLength": 512, "description": "Cursor from a previous call's `after`."},
+            },
+            "required": ["social_account_id"],
+            "additionalProperties": False,
+        },
+        handler=_search_instagram_audio,
+        read_only=True,
+    )
+)
+
+
+# ---------------------------------------------------------------------------
 # Tool: create_draft
 # ---------------------------------------------------------------------------
 
@@ -221,6 +311,7 @@ def _create_draft(args: dict, context: dict[str, Any]) -> dict:
     proposed_publish_at = None
     if args.get("proposed_publish_at") is not None:
         proposed_publish_at = _parse_iso_datetime(args["proposed_publish_at"], "proposed_publish_at")
+    instagram = _parse_instagram(args)
     try:
         tags, category = parse_labels(api_key.workspace, args.get("tags", []), args.get("category", ""))
         post = create_post(
@@ -236,6 +327,7 @@ def _create_draft(args: dict, context: dict[str, Any]) -> dict:
             status="draft",
             tags=tags,
             category=category,
+            instagram=instagram,
         )
     except ValueError as exc:
         raise JsonRpcError(INVALID_PARAMS, str(exc)) from exc
@@ -248,7 +340,8 @@ register_tool(
         description=(
             "Create a draft post against a connected account. The draft is saved but not "
             "queued for publishing; call schedule_post or the schedule tool later to publish. "
-            "Optionally record a non-binding proposed_publish_at suggestion."
+            "Optionally record a non-binding proposed_publish_at suggestion. For an Instagram Reel, "
+            "`instagram` sets music (find tracks with search_instagram_audio) and a cover."
         ),
         input_schema={
             "type": "object",
@@ -296,6 +389,7 @@ register_tool(
                     "maxLength": 100,
                     "description": "Name of an existing workspace content category; empty for none. Unknown names are rejected.",
                 },
+                "instagram": _INSTAGRAM_SCHEMA,
             },
             "required": ["social_account_id", "caption"],
             "additionalProperties": False,
@@ -1646,9 +1740,16 @@ def _update_post(args: dict, context: dict[str, Any]) -> dict:
         tags, category = parse_labels(post.workspace, args.get("tags"), args.get("category"))
     except ValueError as exc:
         raise JsonRpcError(INVALID_PARAMS, str(exc)) from exc
+    instagram = _parse_instagram(args)
 
     with transaction.atomic():
         orig_content = base_content_snapshot(post)
+        instagram_changed = False
+        if instagram is not None:
+            try:
+                instagram_changed = set_instagram_options(post, instagram)
+            except ValueError as exc:
+                raise JsonRpcError(INVALID_PARAMS, str(exc)) from exc
         update_fields = [f for f in _UPDATE_TEXT_FIELDS if f in args]
         for field in update_fields:
             setattr(post, field, args[field])
@@ -1666,7 +1767,7 @@ def _update_post(args: dict, context: dict[str, Any]) -> dict:
         sync_workspace_tags(post.workspace, tags)
         # Same safety net as the composer and PATCH: edited content on an
         # approved post goes back to review.
-        if base_content_snapshot(post) != orig_content:
+        if instagram_changed or base_content_snapshot(post) != orig_content:
             revert_approved_to_review(post)
     post.refresh_from_db()
     return _wrap_text(_serialize_post(post, context))
@@ -1676,10 +1777,11 @@ register_tool(
     Tool(
         name="update_post",
         description=(
-            "Edit an existing post's text, tags or category (REST: PATCH /posts/{id}). Only fields you "
-            "send change; `tags` replaces the whole list. Refused while the post is in review or "
-            "published. Editing title, caption, first comment or tags of an approved post sends it "
-            "back to review. Media and schedule changes stay with the REST route and the composer."
+            "Edit an existing post's text, tags, category or Instagram Reel music/cover (REST: PATCH "
+            "/posts/{id}). Only fields you send change; `tags` and `instagram` replace the whole value "
+            "(`instagram: {}` clears it). Refused while the post is in review or published. Editing title, "
+            "caption, first comment, tags or `instagram` of an approved post sends it back to review. "
+            "Media and schedule changes stay with the REST route and the composer."
         ),
         input_schema={
             "type": "object",
@@ -1701,6 +1803,7 @@ register_tool(
                     "maxLength": 100,
                     "description": "Name of an existing workspace content category; empty for none. Unknown names are rejected.",
                 },
+                "instagram": _INSTAGRAM_SCHEMA,
             },
             "required": ["post_id"],
             "additionalProperties": False,

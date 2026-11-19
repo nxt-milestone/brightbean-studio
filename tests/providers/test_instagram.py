@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, datetime
 from unittest.mock import MagicMock, call
 from urllib.parse import parse_qs, urlparse
@@ -1420,3 +1421,184 @@ def test_images_and_carousels_do_not_ask_for_reel_watch_time(media_product_type)
     assert "ig_reels_avg_watch_time" not in asked
     assert "ig_reels_avg_watch_time" not in metrics.extra["raw_insights"]
     assert metrics.extra["insight_errors"] == {}
+
+
+# Reel music and cover (platform_extra["instagram"])
+# ----------------------------------------------------------------------
+
+REEL_MUSIC = {"audio_id": "587784541076604", "audio_volume": 80, "video_volume": 50}
+
+
+def _publish_reel(options, *, readback=None, cover_url=None, **kwargs):
+    provider = InstagramProvider(IG_CREDS)
+    exchange = [_resp({"id": "container-1"}), _resp({"status_code": "FINISHED"}), _resp({"id": "media-1"})]
+    if readback is not None:
+        exchange.append(readback)
+    provider._request = MagicMock(side_effect=exchange)
+    extra = {"ig_user_id": "ig-1", "instagram": options}
+    if cover_url:
+        extra["cover_url"] = cover_url
+    kwargs.setdefault("media_urls", [VIDEO_URL])
+    kwargs.setdefault("post_type", PostType.REEL)
+    result = provider.publish_post("token", PublishContent(extra=extra, **kwargs))
+    return provider, result
+
+
+def test_a_reel_with_music_and_a_cover_sends_them_on_its_container():
+    provider, _ = _publish_reel(
+        {**REEL_MUSIC, "thumb_offset": 1500, "cover_media_id": "asset-1"},
+        cover_url="https://app.example/media/cover.jpg",
+        readback=_resp({"media_audio_type": "MUSIC"}),
+    )
+
+    payload = provider._request.call_args_list[0].kwargs["json"]
+    assert payload["media_type"] == "REELS"
+    # A JSON string, as Meta verified it; an object is refused.
+    assert json.loads(payload["audio_configuration"]) == REEL_MUSIC
+    assert isinstance(payload["audio_configuration"], str)
+    assert payload["thumb_offset"] == 1500
+    assert payload["cover_url"] == "https://app.example/media/cover.jpg"
+
+
+def test_music_without_volumes_sends_only_the_audio_id():
+    provider, _ = _publish_reel({"audio_id": "42"}, readback=_resp({"media_audio_type": "MUSIC"}))
+
+    assert json.loads(provider._request.call_args_list[0].kwargs["json"]["audio_configuration"]) == {"audio_id": "42"}
+
+
+def test_a_cover_frame_alone_needs_no_readback():
+    provider, result = _publish_reel({"thumb_offset": 0})
+
+    payload = provider._request.call_args_list[0].kwargs["json"]
+    assert payload["thumb_offset"] == 0
+    assert "audio_configuration" not in payload
+    assert "cover_url" not in payload
+    assert provider._request.call_count == 3
+    assert "media_audio_type" not in result.extra
+
+
+def test_a_reel_without_options_sends_none_of_them():
+    provider, _ = _publish_reel({})
+
+    payload = provider._request.call_args_list[0].kwargs["json"]
+    assert not {"audio_configuration", "thumb_offset", "cover_url"} & payload.keys()
+
+
+@pytest.mark.parametrize(
+    ("readback", "expected"),
+    [
+        (_resp({"media_audio_type": "MUSIC", "id": "media-1"}), "MUSIC"),
+        (_resp({"media_audio_type": "ORIGINAL_SOUND"}), "ORIGINAL_SOUND"),
+        (_resp({"id": "media-1"}), None),
+        (APIError("(#100) nonexisting field (media_audio_type)", status_code=400, platform="Instagram"), None),
+    ],
+    ids=["music", "original-sound", "field-missing", "read-fails"],
+)
+def test_music_reads_back_media_audio_type_without_failing_the_publish(readback, expected):
+    provider, result = _publish_reel(REEL_MUSIC, readback=readback)
+
+    call_ = provider._request.call_args_list[3]
+    assert call_.args == ("GET", "https://graph.facebook.com/v25.0/media-1")
+    assert call_.kwargs["params"] == {"fields": "media_audio_type"}
+    assert result.platform_post_id == "media-1"
+    assert result.extra["media_audio_type"] == expected
+
+
+def test_music_and_the_ai_label_are_read_back_in_one_call():
+    provider = InstagramProvider(IG_CREDS)
+    provider._request = MagicMock(
+        side_effect=[
+            _resp({"id": "container-1"}),
+            _resp({"status_code": "FINISHED"}),
+            _resp({"id": "media-1"}),
+            _resp({"is_ai_generated": True, "media_audio_type": "MUSIC"}),
+        ]
+    )
+
+    result = provider.publish_post(
+        "token",
+        PublishContent(
+            media_urls=[VIDEO_URL],
+            post_type=PostType.REEL,
+            extra={**AI_TAGS, "instagram": {"audio_id": "42"}},
+        ),
+    )
+
+    assert provider._request.call_args_list[3].kwargs["params"] == {"fields": "is_ai_generated,media_audio_type"}
+    assert result.extra["is_ai_generated"] is True
+    assert result.extra["media_audio_type"] == "MUSIC"
+
+
+@pytest.mark.parametrize(
+    ("media_urls", "post_type"),
+    [
+        ([IMAGE_URL], PostType.IMAGE),
+        ([VIDEO_URL], PostType.STORY),
+        ([IMAGE_URL, VIDEO_URL], PostType.CAROUSEL),
+    ],
+    ids=["image", "story", "carousel"],
+)
+def test_music_on_anything_but_a_reel_is_refused_before_any_container(media_urls, post_type):
+    """Meta silently drops parameters a container doesn't use; the post must not go out without its music."""
+    provider = InstagramProvider(IG_CREDS)
+    provider._request = MagicMock()
+
+    with pytest.raises(PublishError, match="Reels only") as exc:
+        provider.publish_post(
+            "token",
+            PublishContent(
+                media_urls=media_urls, post_type=post_type, extra={"ig_user_id": "ig-1", "instagram": REEL_MUSIC}
+            ),
+        )
+
+    assert exc.value.retryable is False
+    provider._request.assert_not_called()
+
+
+def test_instagram_login_refuses_music_and_covers():
+    provider = InstagramLoginProvider(IG_LOGIN_CREDS)
+    provider._request = MagicMock()
+
+    with pytest.raises(PublishError, match="Facebook Login") as exc:
+        provider.publish_post(
+            "token", PublishContent(media_urls=[VIDEO_URL], post_type=PostType.REEL, extra={"instagram": REEL_MUSIC})
+        )
+
+    assert exc.value.retryable is False
+    provider._request.assert_not_called()
+
+
+def test_search_audio_asks_ig_audio_and_passes_tracks_through():
+    provider = InstagramProvider(IG_CREDS)
+    track = {
+        "audio_id": "587784541076604",
+        "title": "Sunrise",
+        "display_artist": "Someone",
+        "duration_in_ms": 90000,
+        "audio_type": "music",
+        "download_url": "https://cdn.example/a.m4a",
+        "cover_artwork_thumbnail_uri": "https://cdn.example/a.jpg",
+        "unexpected": "dropped",
+    }
+    provider._request = MagicMock(return_value=_resp({"audio": [track], "paging": {"cursors": {"after": "CURSOR"}}}))
+
+    found = provider.search_audio("token", "ig-1", query="sunrise", after="PREV")
+
+    provider._request.assert_called_once_with(
+        "GET",
+        "https://graph.facebook.com/v25.0/ig_audio",
+        access_token="token",
+        params={"audio_type": "music", "user_id": "ig-1", "search_query": "sunrise", "after": "PREV"},
+    )
+    assert found["after"] == "CURSOR"
+    assert found["audio"] == [{k: v for k, v in track.items() if k != "unexpected"}]
+
+
+def test_search_audio_without_words_asks_for_trending():
+    provider = InstagramProvider(IG_CREDS)
+    provider._request = MagicMock(return_value=_resp({"audio": []}))
+
+    found = provider.search_audio("token", "ig-1", audio_type="original_sound")
+
+    assert provider._request.call_args.kwargs["params"] == {"audio_type": "original_sound", "user_id": "ig-1"}
+    assert found == {"audio": [], "after": None}
