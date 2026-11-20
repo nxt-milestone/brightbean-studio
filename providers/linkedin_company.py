@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 
 from .linkedin import API_BASE, LINKEDIN_HEADERS, LinkedInProvider, _encode_urn
+from .types import AccountProfile
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,27 @@ class LinkedInCompanyProvider(LinkedInProvider):
         if author.startswith("urn:li:organization:"):
             return author
         return super()._comment_actor(access_token, post_id)
+
+    def get_profile(self, access_token: str, *, organization_id: str | None = None) -> AccountProfile:
+        """The page's name and logo when ``organization_id`` is given, else the connected member.
+
+        Inbox, replies and the comment fallback still need the member, so the
+        member stays the default. ``/v2/me`` would give the member's name and
+        their photo as a bare ``digitalmediaAsset`` URN, not a URL.
+        """
+        if not organization_id:
+            return super().get_profile(access_token)
+        page = next((p for p in self.get_user_pages(access_token) if p["id"] == organization_id), None)
+        if page is None:
+            # Empty fields: the health check keeps the stored name and logo.
+            logger.warning("LinkedIn organization %s is not among the member's administered pages", organization_id)
+            return AccountProfile(platform_id=organization_id, name="")
+        return AccountProfile(
+            platform_id=organization_id,
+            name=page["name"],
+            handle=page["handle"] or None,
+            avatar_url=page["picture"],
+        )
 
     def get_user_pages(self, access_token: str) -> list[dict]:
         resp = self._request(

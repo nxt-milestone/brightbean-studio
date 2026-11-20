@@ -528,3 +528,64 @@ class TestWebhookResubscription:
             check_social_account_health.now(str(connected_account.id))
 
         subscribe.assert_not_called()
+
+
+@pytest.mark.django_db
+class TestLinkedInCompanyHealthCheck:
+    """The health check refreshes a Company Page from the organization, not the member who connected it."""
+
+    LOGO = "https://media.licdn.com/dms/image/C4D0BAQ/company-logo_200_200/0/logo.png"
+
+    @staticmethod
+    def _linkedin(method, url, **kwargs):
+        resp = MagicMock()
+        if "/v2/me" in url:
+            resp.json.return_value = {
+                "id": "member-1",
+                "localizedFirstName": "Stig Hendrik",
+                "localizedLastName": "Dreyer",
+                "profilePicture": {"displayImage": "urn:li:digitalmediaAsset:C4D03AQECCgqTy4ZPwg"},
+            }
+        elif "/v2/organizationalEntityAcls" in url:
+            resp.json.return_value = {
+                "elements": [
+                    {
+                        "organizationalTarget": "urn:li:organization:42906014",
+                        "organizationalTarget~": {
+                            "localizedName": "nxt milestone",
+                            "vanityName": "nxtmilestone",
+                            "logoV2": {
+                                "original~": {
+                                    "elements": [{"identifiers": [{"identifier": TestLinkedInCompanyHealthCheck.LOGO}]}]
+                                }
+                            },
+                        },
+                    }
+                ]
+            }
+        else:
+            raise AssertionError(f"unexpected request {url}")
+        return resp
+
+    def test_keeps_the_page_name_and_stores_a_loadable_logo(self, workspace):
+        from providers.linkedin_company import LinkedInCompanyProvider
+
+        account = SocialAccount.objects.create(
+            workspace=workspace,
+            platform="linkedin_company",
+            account_platform_id="42906014",
+            account_name="Stig Hendrik Dreyer",
+            account_handle="nxtmilestone",
+            avatar_url="urn:li:digitalmediaAsset:C4D03AQECCgqTy4ZPwg",
+            oauth_access_token="valid_token",
+            connection_status=SocialAccount.ConnectionStatus.CONNECTED,
+        )
+
+        with patch.object(LinkedInCompanyProvider, "_request", side_effect=self._linkedin):
+            check_social_account_health.now(str(account.id))
+
+        account.refresh_from_db()
+        assert account.account_name == "nxt milestone"
+        assert account.account_handle == "nxtmilestone"
+        assert account.avatar_url == self.LOGO
+        assert account.connection_status == SocialAccount.ConnectionStatus.CONNECTED
