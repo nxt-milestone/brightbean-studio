@@ -36,6 +36,7 @@ def _check_social_account_health(account_id: str):
     is expiring soon, attempts to refresh it first.
     """
     from providers import get_provider
+    from providers.linkedin_company import LinkedInCompanyProvider
 
     from .error_messages import friendly_health_check_error, quota_blocked_message
     from .models import SocialAccount
@@ -120,7 +121,11 @@ def _check_social_account_health(account_id: str):
     else:
         # Validate token by fetching profile
         try:
-            profile = provider.get_profile(account.oauth_access_token)
+            if isinstance(provider, LinkedInCompanyProvider):
+                # The page itself, not the member who connected it.
+                profile = provider.get_profile(account.oauth_access_token, organization_id=account.account_platform_id)
+            else:
+                profile = provider.get_profile(account.oauth_access_token)
             account.follower_count = profile.follower_count
             # Provider CDNs (TikTok, Meta) return signed avatar URLs that
             # expire; display names and handles can also change on-platform.
