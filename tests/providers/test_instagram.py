@@ -1602,3 +1602,51 @@ def test_search_audio_without_words_asks_for_trending():
 
     assert provider._request.call_args.kwargs["params"] == {"audio_type": "original_sound", "user_id": "ig-1"}
     assert found == {"audio": [], "after": None}
+
+
+@pytest.mark.parametrize(("make_provider", "create_url"), IG_PUBLISHERS)
+def test_a_single_image_carries_its_alt_text(make_provider, create_url):
+    provider = make_provider()
+
+    _publish(
+        provider, media_urls=[IMAGE_URL], media_alt_texts=["Ein Fahrplan in vier Schritten"], post_type=PostType.IMAGE
+    )
+
+    assert provider._request.call_args_list[0].kwargs["json"] == {
+        "image_url": IMAGE_URL,
+        "alt_text": "Ein Fahrplan in vier Schritten",
+    }
+
+
+@pytest.mark.parametrize(("make_provider", "create_url"), IG_PUBLISHERS)
+def test_each_carousel_image_carries_its_own_alt_text(make_provider, create_url):
+    """Meta takes alt_text per image container; a page without one sends none, and a video child never does."""
+    provider = make_provider()
+    provider._request = MagicMock(
+        side_effect=[
+            _resp({"id": "child-1"}),
+            _resp({"status_code": "FINISHED"}),
+            _resp({"id": "child-2"}),
+            _resp({"status_code": "FINISHED"}),
+            _resp({"id": "child-3"}),
+            _resp({"status_code": "FINISHED"}),
+            _resp({"id": "carousel-1"}),
+            _resp({"status_code": "FINISHED"}),
+            _resp({"id": "media-1"}),
+        ]
+    )
+
+    provider.publish_post(
+        "token",
+        PublishContent(
+            media_urls=[IMAGE_URL, IMAGE_URL, VIDEO_URL],
+            media_alt_texts=["Seite eins", "", "ein Video"],
+            post_type=PostType.CAROUSEL,
+            extra={"ig_user_id": "ig-1"},
+        ),
+    )
+
+    first, second, third = (provider._request.call_args_list[i].kwargs["json"] for i in (0, 2, 4))
+    assert first == {"is_carousel_item": True, "image_url": IMAGE_URL, "alt_text": "Seite eins"}
+    assert second == {"is_carousel_item": True, "image_url": IMAGE_URL}
+    assert third == {"is_carousel_item": True, "media_type": "VIDEO", "video_url": VIDEO_URL}

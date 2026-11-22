@@ -207,6 +207,9 @@ class PublishContent:
     # Per-item media type ("image" / "video" / "gif" / ...), parallel to
     # ``media_urls``. Filled by the engine from MediaAsset.media_type.
     media_types: list[str] = field(default_factory=list)
+    # Alt text per item, parallel to ``media_urls`` ("" where none). Filled by
+    # the engine from the attachment, else from the media asset.
+    media_alt_texts: list[str] = field(default_factory=list)
     # The same for every attempt at one PlatformPost. A provider whose platform
     # honours request idempotency sends it, so a retry after a lost response
     # cannot publish twice.
@@ -233,3 +236,7 @@ class PublishContent:
         if index < len(self.media_types) and self.media_types[index]:
             return self.media_types[index] == "video"
         return index < len(self.media_urls) and is_video_url(self.media_urls[index])
+
+    def alt_text(self, index: int = 0) -> str:
+        """Alt text of media item ``index``, or "" when it has none."""
+        return self.media_alt_texts[index] if index < len(self.media_alt_texts) else ""

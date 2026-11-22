@@ -339,6 +339,8 @@ class LinkedInProvider(SocialProvider):
                 "id": image_urn,
             }
         }
+        if content.alt_text(0):
+            body["content"]["media"]["altText"] = content.alt_text(0)
 
         resp = self._request(
             "POST",
