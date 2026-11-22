@@ -351,6 +351,8 @@ class InstagramLoginProvider(SocialProvider):
             payload["video_url"] = url
         else:
             payload["image_url"] = url
+            if content.alt_text(0):
+                payload["alt_text"] = content.alt_text(0)
 
         container_id = self._create_container(access_token, payload)
         self._wait_for_container(access_token, container_id)
@@ -366,6 +368,8 @@ class InstagramLoginProvider(SocialProvider):
                 child_payload["video_url"] = url
             else:
                 child_payload["image_url"] = url
+                if content.alt_text(index):
+                    child_payload["alt_text"] = content.alt_text(index)
 
             child_id = self._create_container(access_token, child_payload)
             self._wait_for_container(access_token, child_id)

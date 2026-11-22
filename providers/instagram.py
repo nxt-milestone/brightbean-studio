@@ -413,6 +413,8 @@ class InstagramProvider(SocialProvider):
             payload["video_url"] = url
         else:
             payload["image_url"] = url
+            if content.alt_text(0):
+                payload["alt_text"] = content.alt_text(0)
 
         if _is_ai_generated(content):
             payload["is_ai_generated"] = True
@@ -444,6 +446,8 @@ class InstagramProvider(SocialProvider):
                 child_payload["video_url"] = url
             else:
                 child_payload["image_url"] = url
+                if content.alt_text(index):
+                    child_payload["alt_text"] = content.alt_text(index)
 
             child_id = self._create_container(access_token, ig_user_id, child_payload)
             self._wait_for_container(access_token, child_id)

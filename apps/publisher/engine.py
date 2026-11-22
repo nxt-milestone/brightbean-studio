@@ -762,6 +762,7 @@ class PublishEngine:
         # at upload, so providers can route on what the file *is* rather than on
         # a storage-key extension copied from the client-declared filename.
         media_types = []
+        media_alt_texts = []
         temp_files = []
         # Owned locally only when the caller didn't hand us a post-level cache
         # (the retry path); ``owns_cache`` decides who cleans it up.
@@ -806,6 +807,9 @@ class PublishEngine:
                     url = f"{app_url}{url}"
                 media_urls.append(url)
                 media_types.append(asset.media_type)
+                # The API attaches assets without their own alt text, so fall
+                # back to the one given at upload.
+                media_alt_texts.append(pm.alt_text or asset.alt_text or "")
 
                 if needs_local_media:
                     media_files.append(media_cache.path_for(asset))
@@ -895,6 +899,7 @@ class PublishEngine:
                 media_files=media_files,
                 media_urls=media_urls,
                 media_types=media_types,
+                media_alt_texts=media_alt_texts,
                 post_type=post_type,
                 extra=extra,
                 link_url=link_url,
