@@ -339,6 +339,10 @@ GOOGLE_AUTH_CLIENT_SECRET = env("GOOGLE_AUTH_CLIENT_SECRET", default="")
 # Unsplash stock-photo search in the composer (optional; empty disables the feature)
 UNSPLASH_ACCESS_KEY = env("UNSPLASH_ACCESS_KEY", default="")
 
+# Our hosted HyperFrames Studio (media-renderer): the composer links a saved post to <STUDIO_URL>/p/<post id>, where its
+# visual opens for touching up, or a new one starts from a starter. Empty: no link.
+STUDIO_URL = env("STUDIO_URL", default="").strip().rstrip("/")
+
 SOCIALACCOUNT_PROVIDERS = {
     "google": {
         "APP": {

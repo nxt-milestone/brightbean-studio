@@ -462,6 +462,14 @@
                         <label class="text-sm font-semibold text-stone-500 uppercase tracking-wider"
                                x-text="captionLabel">Caption</label>
                         <div class="flex items-center gap-2 relative">
+                            {% if studio_url %}
+                            <a href="{{ studio_url }}" target="_blank" rel="noopener"
+                               title="Open this post's visual in Studio, or make a new one from a starter"
+                               class="text-xs font-semibold py-1.5 px-3 rounded-full border border-stone-200 text-stone-500 hover:border-stone-300 hover:text-stone-700 transition-colors flex items-center gap-1">
+                                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M15.232 5.232l3.536 3.536M9 13l6.232-6.232a2.5 2.5 0 113.536 3.536L12.536 16.536 8 18l1.464-4.536z"/></svg>
+                                Edit in Studio
+                            </a>
+                            {% endif %}
                             {% if post and is_edit %}
                             <div x-data="{ showSaveTemplate: false }">
                                 <button type="button" @click="showSaveTemplate = !showSaveTemplate"

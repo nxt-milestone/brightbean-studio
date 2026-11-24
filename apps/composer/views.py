@@ -866,6 +866,7 @@ def compose(request, workspace_id, post_id=None):
         "failed_platform_posts": failed_platform_posts,
         "failed_first_comments": failed_first_comments,
         "unsplash_enabled": bool(settings.UNSPLASH_ACCESS_KEY),
+        "studio_url": f"{settings.STUDIO_URL}/p/{post.id}" if post and settings.STUDIO_URL else "",
     }
     return render(request, "composer/compose.html", context)
 
