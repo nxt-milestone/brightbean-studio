@@ -1562,9 +1562,11 @@
             </div>
         </form>
 
-        {% if post and approval_history %}
+        {% if post %}
         <!-- Approval History & Comments -->
         <div class="mt-4 border-t border-stone-200 pt-4">
+            {# nxt: comments show on every saved post; banner, history and review buttons only once reviewed #}
+            {% if approval_history %}
             <!-- Status banner -->
             {% if post.status == 'pending_review' %}
             <div class="flex items-center gap-2 px-3 py-2 rounded-lg bg-orange-50 border border-orange-100 mb-3">
@@ -1643,6 +1645,7 @@
                 </div>
                 {% endfor %}
             </div>
+            {% endif %}
 
             <!-- Comments -->
             {% if post_comments or post %}
