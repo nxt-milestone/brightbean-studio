@@ -35,7 +35,9 @@ class DraftCommentsTests(TestCase):
         self.client.force_login(self.user)
         self.post = Post.objects.create(workspace=self.ws, author=self.user, caption="draft")
         PlatformPost.objects.create(post=self.post, social_account=account, status="draft")
-        self.comment_url = reverse("approvals:add_comment", kwargs={"workspace_id": self.ws.id, "post_id": self.post.id})
+        self.comment_url = reverse(
+            "approvals:add_comment", kwargs={"workspace_id": self.ws.id, "post_id": self.post.id}
+        )
 
     def _edit(self):
         url = reverse("composer:compose_edit", kwargs={"workspace_id": self.ws.id, "post_id": self.post.id})
