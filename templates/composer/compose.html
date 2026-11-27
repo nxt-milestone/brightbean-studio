@@ -1383,9 +1383,110 @@
                         <span class="text-[10px] font-semibold text-stone-400 bg-stone-100 px-2 py-0.5 rounded-full uppercase tracking-wider">Internal team only</span>
                     </div>
                     <textarea name="internal_notes"
-                              class="w-full text-sm font-normal px-4 py-3 rounded-xl border border-dashed border-stone-200 bg-stone-50/80 text-stone-600 outline-none focus:border-stone-300 transition-all duration-150 resize-none"
+                              class="w-full text-sm font-normal px-4 py-3 rounded-xl border border-dashed border-stone-200 bg-stone-50/80 text-stone-600 outline-none focus:border-stone-300 transition-all duration-150 resize-y"
                               placeholder="Internal team notes - not visible to clients…"
-                              rows="2">{{ form.internal_notes.value|default:"" }}</textarea>
+                              rows="14">{{ form.internal_notes.value|default:"" }}</textarea>
+                </div>
+                {% endif %}
+
+                {% if post %}
+                <!-- Approval History & Comments -->
+                {# nxt: comments sit under Notes inside #composer-form; the comment <form> itself is the empty #comment-form-<id> after it (no nested forms) #}
+                <div class="border-t border-stone-200 pt-4">
+                <div>
+                    {# nxt: comments show on every saved post; banner, history and review buttons only once reviewed #}
+                    {% if approval_history %}
+                    <!-- Status banner -->
+                    {% if post.status == 'pending_review' %}
+                    <div class="flex items-center gap-2 px-3 py-2 rounded-lg bg-orange-50 border border-orange-100 mb-3">
+                        <svg class="w-4 h-4 text-orange-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                        <span class="text-sm font-medium text-orange-700">Awaiting internal review</span>
+                    </div>
+                    {% elif post.status == 'pending_client' %}
+                    <div class="flex items-center gap-2 px-3 py-2 rounded-lg bg-amber-50 border border-amber-100 mb-3">
+                        <svg class="w-4 h-4 text-amber-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                        <span class="text-sm font-medium text-amber-700">Awaiting client approval</span>
+                    </div>
+                    {% elif post.status == 'changes_requested' %}
+                    <div class="flex items-center gap-2 px-3 py-2 rounded-lg bg-orange-50 border border-orange-100 mb-3">
+                        <svg class="w-4 h-4 text-orange-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931z"/></svg>
+                        <span class="text-sm font-medium text-orange-700">Changes requested - edit and resubmit</span>
+                    </div>
+                    {% elif post.status == 'rejected' %}
+                    <div class="flex items-center gap-2 px-3 py-2 rounded-lg bg-red-50 border border-red-100 mb-3">
+                        <svg class="w-4 h-4 text-red-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+                        <span class="text-sm font-medium text-red-700">Rejected - edit and resubmit or delete</span>
+                    </div>
+                    {% elif post.status == 'approved' %}
+                    <div class="flex items-center gap-2 px-3 py-2 rounded-lg bg-teal-50 border border-teal-100 mb-3">
+                        <svg class="w-4 h-4 text-teal-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                        <span class="text-sm font-medium text-teal-700">Approved - saving changes sends it back for re-approval</span>
+                    </div>
+                    {% elif post.status == 'on_hold' %}
+                    <div class="flex items-center gap-2 px-3 py-2 rounded-lg mb-3" style="background:#F5F3FF;border:1px solid #DDD6FE;">
+                        <svg class="w-4 h-4 flex-shrink-0" style="color:#7C3AED;" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>
+                        <span class="text-sm font-medium" style="color:#6D28D9;">On hold - a client paused this; resume it from the approvals queue</span>
+                    </div>
+                    {% endif %}
+
+                    <!-- Reviewer feedback to address (latest changes-requested / rejected comment) -->
+                    {% if show_resubmit_button and latest_feedback %}
+                    <div class="flex gap-3 p-4 rounded-xl mb-3" style="background:#FFF7ED;border:1px solid #FED7AA;">
+                        <span class="w-7 h-7 rounded-full flex items-center justify-center text-[11px] font-bold text-white flex-shrink-0" style="background: var(--primary);">{{ latest_feedback.user.display_name|default:"?"|make_list|first|upper }}</span>
+                        <div class="min-w-0">
+                            <div class="flex items-center gap-2 flex-wrap">
+                                <span class="text-[0.8125rem] font-semibold text-stone-800">{{ latest_feedback.user.display_name|default:"Reviewer" }}</span>
+                                <span class="text-[0.6875rem] font-semibold px-2 py-0.5 rounded-full" style="background:#FFEDD5;color:#C2410C;">{% if latest_feedback.action == 'rejected' %}rejected{% else %}requested changes{% endif %}</span>
+                                <span class="text-[0.6875rem] text-stone-400">{{ latest_feedback.created_at|timesince }} ago</span>
+                            </div>
+                            <p class="text-[0.875rem] text-stone-700 mt-1 leading-relaxed">{{ latest_feedback.comment }}</p>
+                        </div>
+                    </div>
+                    {% endif %}
+
+                    <!-- Inline approval actions for reviewers -->
+                    {% if can_approve and post.status == 'pending_review' or can_approve and post.status == 'pending_client' %}
+                    <div class="flex gap-2 mb-3 relative" x-data="{ showReviewComment: false, reviewComment: '' }">
+                        <button type="button" hx-post="{% url 'approvals:approve' workspace_id=workspace.id post_id=post.id %}" hx-swap="none" hx-params="none"
+                                class="px-3 py-1.5 text-xs font-semibold rounded-full bg-emerald-500 hover:bg-emerald-600 text-white transition-colors">Approve</button>
+                        <button type="button" @click="showReviewComment = !showReviewComment" class="px-3 py-1.5 text-xs font-semibold rounded-full border border-stone-200 text-stone-600 hover:bg-stone-50 transition-colors">Request Changes</button>
+                        <div x-show="showReviewComment" x-cloak class="absolute mt-9 z-10 bg-white rounded-lg shadow-lg border border-stone-200 p-3 w-80">
+                            <textarea id="composer-review-comment" name="comment" rows="2" x-model="reviewComment" class="w-full px-2 py-1.5 text-sm border border-stone-200 rounded-lg resize-none" placeholder="What needs to change?"></textarea>
+                            <button type="button" hx-post="{% url 'approvals:request_changes' workspace_id=workspace.id post_id=post.id %}"
+                                    hx-include="#composer-review-comment" hx-params="comment" hx-swap="none"
+                                    :disabled="!reviewComment.trim()" :class="!reviewComment.trim() && 'opacity-50 cursor-not-allowed'"
+                                    class="mt-2 px-3 py-1 text-xs font-semibold rounded-full bg-amber-500 text-white">Submit</button>
+                        </div>
+                    </div>
+                    {% endif %}
+
+                    <!-- Approval timeline -->
+                    <h4 class="text-sm font-semibold text-stone-500 uppercase tracking-wider mb-2">Approval History</h4>
+                    <div class="space-y-2 mb-4">
+                        {% for action in approval_history %}
+                        <div class="flex items-start gap-2">
+                            <div class="w-1.5 h-1.5 rounded-full mt-1.5 flex-shrink-0 {% if action.action == 'approved' %}bg-emerald-400{% elif action.action == 'rejected' %}bg-red-400{% elif action.action == 'changes_requested' %}bg-amber-400{% else %}bg-stone-300{% endif %}"></div>
+                            <div>
+                                <p class="text-xs text-stone-600"><span class="font-semibold">{{ action.user.display_name }}</span> {{ action.get_action_display|lower }}</p>
+                                {% if action.comment %}<p class="text-xs text-stone-400 mt-0.5">"{{ action.comment|truncatechars:80 }}"</p>{% endif %}
+                                <p class="text-[10px] text-stone-400">{{ action.created_at|timesince }} ago</p>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                    {% endif %}
+
+                    <!-- Comments -->
+                    {% if post_comments or post %}
+                    <h4 class="text-sm font-semibold text-stone-500 uppercase tracking-wider mb-2">Comments</h4>
+                    <div id="composer-comments" class="pb-3">
+                        {% include "approvals/partials/comment_list.html" with comments=post_comments post=post %}
+                    </div>
+                    {% endif %}
+                </div>
+                <div class="mt-1">
+                    {% include "approvals/partials/comment_form.html" with post=post workspace=workspace %}
+                </div>
                 </div>
                 {% endif %}
             </div>
@@ -1563,102 +1664,15 @@
         </form>
 
         {% if post %}
-        <!-- Approval History & Comments -->
-        <div class="mt-4 border-t border-stone-200 pt-4">
-            {# nxt: comments show on every saved post; banner, history and review buttons only once reviewed #}
-            {% if approval_history %}
-            <!-- Status banner -->
-            {% if post.status == 'pending_review' %}
-            <div class="flex items-center gap-2 px-3 py-2 rounded-lg bg-orange-50 border border-orange-100 mb-3">
-                <svg class="w-4 h-4 text-orange-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
-                <span class="text-sm font-medium text-orange-700">Awaiting internal review</span>
-            </div>
-            {% elif post.status == 'pending_client' %}
-            <div class="flex items-center gap-2 px-3 py-2 rounded-lg bg-amber-50 border border-amber-100 mb-3">
-                <svg class="w-4 h-4 text-amber-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
-                <span class="text-sm font-medium text-amber-700">Awaiting client approval</span>
-            </div>
-            {% elif post.status == 'changes_requested' %}
-            <div class="flex items-center gap-2 px-3 py-2 rounded-lg bg-orange-50 border border-orange-100 mb-3">
-                <svg class="w-4 h-4 text-orange-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M16.862 4.487l1.687-1.688a1.875 1.875 0 112.652 2.652L10.582 16.07a4.5 4.5 0 01-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 011.13-1.897l8.932-8.931z"/></svg>
-                <span class="text-sm font-medium text-orange-700">Changes requested - edit and resubmit</span>
-            </div>
-            {% elif post.status == 'rejected' %}
-            <div class="flex items-center gap-2 px-3 py-2 rounded-lg bg-red-50 border border-red-100 mb-3">
-                <svg class="w-4 h-4 text-red-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
-                <span class="text-sm font-medium text-red-700">Rejected - edit and resubmit or delete</span>
-            </div>
-            {% elif post.status == 'approved' %}
-            <div class="flex items-center gap-2 px-3 py-2 rounded-lg bg-teal-50 border border-teal-100 mb-3">
-                <svg class="w-4 h-4 text-teal-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
-                <span class="text-sm font-medium text-teal-700">Approved - saving changes sends it back for re-approval</span>
-            </div>
-            {% elif post.status == 'on_hold' %}
-            <div class="flex items-center gap-2 px-3 py-2 rounded-lg mb-3" style="background:#F5F3FF;border:1px solid #DDD6FE;">
-                <svg class="w-4 h-4 flex-shrink-0" style="color:#7C3AED;" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/></svg>
-                <span class="text-sm font-medium" style="color:#6D28D9;">On hold - a client paused this; resume it from the approvals queue</span>
-            </div>
-            {% endif %}
-
-            <!-- Reviewer feedback to address (latest changes-requested / rejected comment) -->
-            {% if show_resubmit_button and latest_feedback %}
-            <div class="flex gap-3 p-4 rounded-xl mb-3" style="background:#FFF7ED;border:1px solid #FED7AA;">
-                <span class="w-7 h-7 rounded-full flex items-center justify-center text-[11px] font-bold text-white flex-shrink-0" style="background: var(--primary);">{{ latest_feedback.user.display_name|default:"?"|make_list|first|upper }}</span>
-                <div class="min-w-0">
-                    <div class="flex items-center gap-2 flex-wrap">
-                        <span class="text-[0.8125rem] font-semibold text-stone-800">{{ latest_feedback.user.display_name|default:"Reviewer" }}</span>
-                        <span class="text-[0.6875rem] font-semibold px-2 py-0.5 rounded-full" style="background:#FFEDD5;color:#C2410C;">{% if latest_feedback.action == 'rejected' %}rejected{% else %}requested changes{% endif %}</span>
-                        <span class="text-[0.6875rem] text-stone-400">{{ latest_feedback.created_at|timesince }} ago</span>
-                    </div>
-                    <p class="text-[0.875rem] text-stone-700 mt-1 leading-relaxed">{{ latest_feedback.comment }}</p>
-                </div>
-            </div>
-            {% endif %}
-
-            <!-- Inline approval actions for reviewers -->
-            {% if can_approve and post.status == 'pending_review' or can_approve and post.status == 'pending_client' %}
-            <div class="flex gap-2 mb-3 relative" x-data="{ showReviewComment: false, reviewComment: '' }">
-                <button hx-post="{% url 'approvals:approve' workspace_id=workspace.id post_id=post.id %}" hx-swap="none"
-                        class="px-3 py-1.5 text-xs font-semibold rounded-full bg-emerald-500 hover:bg-emerald-600 text-white transition-colors">Approve</button>
-                <button @click="showReviewComment = !showReviewComment" class="px-3 py-1.5 text-xs font-semibold rounded-full border border-stone-200 text-stone-600 hover:bg-stone-50 transition-colors">Request Changes</button>
-                <div x-show="showReviewComment" x-cloak class="absolute mt-9 z-10 bg-white rounded-lg shadow-lg border border-stone-200 p-3 w-80">
-                    <textarea id="composer-review-comment" name="comment" rows="2" x-model="reviewComment" class="w-full px-2 py-1.5 text-sm border border-stone-200 rounded-lg resize-none" placeholder="What needs to change?"></textarea>
-                    <button hx-post="{% url 'approvals:request_changes' workspace_id=workspace.id post_id=post.id %}"
-                            hx-include="#composer-review-comment" hx-swap="none"
-                            :disabled="!reviewComment.trim()" :class="!reviewComment.trim() && 'opacity-50 cursor-not-allowed'"
-                            class="mt-2 px-3 py-1 text-xs font-semibold rounded-full bg-amber-500 text-white">Submit</button>
-                </div>
-            </div>
-            {% endif %}
-
-            <!-- Approval timeline -->
-            <h4 class="text-xs font-semibold text-stone-500 uppercase tracking-wider mb-2">Approval History</h4>
-            <div class="space-y-2 mb-4">
-                {% for action in approval_history %}
-                <div class="flex items-start gap-2">
-                    <div class="w-1.5 h-1.5 rounded-full mt-1.5 flex-shrink-0 {% if action.action == 'approved' %}bg-emerald-400{% elif action.action == 'rejected' %}bg-red-400{% elif action.action == 'changes_requested' %}bg-amber-400{% else %}bg-stone-300{% endif %}"></div>
-                    <div>
-                        <p class="text-xs text-stone-600"><span class="font-semibold">{{ action.user.display_name }}</span> {{ action.get_action_display|lower }}</p>
-                        {% if action.comment %}<p class="text-xs text-stone-400 mt-0.5">"{{ action.comment|truncatechars:80 }}"</p>{% endif %}
-                        <p class="text-[10px] text-stone-400">{{ action.created_at|timesince }} ago</p>
-                    </div>
-                </div>
-                {% endfor %}
-            </div>
-            {% endif %}
-
-            <!-- Comments -->
-            {% if post_comments or post %}
-            <h4 class="text-xs font-semibold text-stone-500 uppercase tracking-wider mb-2">Comments</h4>
-            <div id="composer-comments">
-                {% include "approvals/partials/comment_list.html" with comments=post_comments post=post %}
-            </div>
-            <div class="mt-3">
-                {% include "approvals/partials/comment_form.html" with post=post workspace=workspace %}
-            </div>
-            {% endif %}
-        </div>
+        {# Fields live under Notes inside #composer-form and join this form via form="…" #}
+        <form id="comment-form-{{ post.id }}"
+              hx-post="{% url 'approvals:add_comment' workspace_id=workspace.id post_id=post.id %}"
+              hx-target="#comment-list-{{ post.id }}"
+              hx-swap="outerHTML"
+              hx-encoding="multipart/form-data"
+              hx-on::after-request="if (event.detail.successful) for (const n of ['body', 'attachment']) this.elements[n].value = ''"></form>
         {% endif %}
+
 
         {% if not post_is_readonly %}
         <!-- Auto-save trigger (every 30 seconds) -->

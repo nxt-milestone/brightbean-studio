@@ -1,4 +1,5 @@
 <div id="comment-list-{{ post.id }}" class="space-y-3">
+    {% with can_moderate=request.workspace_membership.effective_permissions.approve_posts %}
     {% for comment in comments %}
     <div class="flex gap-2.5 {% if comment.visibility == 'internal' %}bg-amber-50/50 -mx-2 px-2 py-2 rounded-lg border border-amber-100/60{% endif %}"
          id="comment-{{ comment.id }}">
@@ -14,6 +15,16 @@
                 <span class="text-[0.625rem] font-semibold uppercase tracking-wider text-amber-600 bg-amber-100 px-1.5 py-0.5 rounded">Internal</span>
                 {% endif %}
                 <span class="text-[0.6875rem] text-stone-400 ml-auto">{{ comment.created_at|timesince }} ago</span>
+                {% if comment.author_id == request.user.id or can_moderate %}
+                {# type=button + hx-params=none: this list renders inside #composer-form #}
+                <button type="button"
+                        hx-post="{% url 'approvals:delete_comment' workspace_id=workspace.id post_id=post.id comment_id=comment.id %}"
+                        hx-target="#comment-list-{{ post.id }}" hx-swap="outerHTML" hx-params="none"
+                        hx-confirm="Delete this comment?"
+                        class="text-stone-300 hover:text-red-500 transition-colors cursor-pointer" title="Delete comment" aria-label="Delete comment">
+                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+                </button>
+                {% endif %}
             </div>
             <p class="text-sm text-stone-600 leading-relaxed whitespace-pre-wrap">{{ comment.body }}</p>
 
@@ -48,4 +59,5 @@
     {% empty %}
     <p class="text-sm text-stone-400 text-center py-4">No comments yet</p>
     {% endfor %}
+    {% endwith %}
 </div>

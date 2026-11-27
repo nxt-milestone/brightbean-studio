@@ -93,6 +93,7 @@ def delete_comment(comment_id, user, workspace):
     """Soft-delete a comment. Authors and managers can delete."""
     comment = PostComment.objects.filter(
         id=comment_id,
+        post__workspace=workspace,  # a manager elsewhere must not delete this workspace's comments
         deleted_at__isnull=True,
     ).first()
 

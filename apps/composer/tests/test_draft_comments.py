@@ -53,3 +53,41 @@ class DraftCommentsTests(TestCase):
         html = self._edit()
         self.assertIn(">Approval History</h4>", html)
         self.assertIn(self.comment_url, html)
+
+    def test_the_comment_form_is_not_nested_in_the_editor_form(self):
+        # Comments sit under Notes inside #composer-form; the comment form is outside and fields join via form="…".
+        html = self._edit()
+        editor_form = html[
+            html.index('<form id="composer-form"') : html.index("</form>", html.index('<form id="composer-form"'))
+        ]
+        self.assertNotIn("<form", editor_form[1:])
+        self.assertIn(f'form="comment-form-{self.post.id}" name="body"', editor_form)
+        self.assertIn(f'<form id="comment-form-{self.post.id}"', html)
+
+    def test_the_author_can_delete_their_comment_from_the_editor(self):
+        from apps.approvals.comments import create_comment
+
+        comment = create_comment(post=self.post, author=self.user, body="Bitte ändern", visibility="external")
+        delete_url = reverse(
+            "approvals:delete_comment",
+            kwargs={"workspace_id": self.ws.id, "post_id": self.post.id, "comment_id": comment.id},
+        )
+        self.assertIn(delete_url, self._edit())
+        resp = self.client.post(delete_url)
+        self.assertEqual(resp.status_code, 200)
+        comment.refresh_from_db()
+        self.assertIsNotNone(comment.deleted_at)
+
+    def test_a_comment_from_another_workspace_cannot_be_deleted(self):
+        from apps.approvals.comments import create_comment
+
+        other_ws = Workspace.objects.create(organization=self.org, name="Other", timezone="Europe/Berlin")
+        other_post = Post.objects.create(workspace=other_ws, author=self.user, caption="x")
+        comment = create_comment(post=other_post, author=self.user, body="nope", visibility="external")
+        url = reverse(
+            "approvals:delete_comment",
+            kwargs={"workspace_id": self.ws.id, "post_id": self.post.id, "comment_id": comment.id},
+        )
+        self.assertEqual(self.client.post(url).status_code, 400)
+        comment.refresh_from_db()
+        self.assertIsNone(comment.deleted_at)
