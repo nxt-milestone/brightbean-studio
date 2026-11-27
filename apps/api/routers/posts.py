@@ -546,29 +546,40 @@ def schedule(request, post_id: uuid.UUID, payload: ScheduleRequest):
     _require_perm(request, "publish_directly")
     post = _get_workspace_post(request, post_id)
 
-    # Schedule every draft or approved child; a single-account key produces
-    # one child, but defensively we apply the transition to all of them so we
-    # don't half-schedule. Drafts still hit the workspace approval gate in
-    # ``transition_platform_post``; approved children have passed it.
-    drafts = list(post.platform_posts.filter(status__in=("draft", "approved")))
-    if not drafts:
-        raise HttpError(409, "No draft or approved platform posts to schedule.")
-
-    # Quota check is per-account, so we evaluate it once per child before
-    # we touch any state. Doing the checks first means an over-quota
-    # account fails the whole route with 429 — no partial commit.
-    for pp in drafts:
-        check_platform_quota(pp.social_account)
-
-    # Wrap the per-child transitions in a single outer atomic so a
-    # mid-loop ValueError rolls back any earlier ``scheduled`` commits.
-    # Without this, child 1 could be persisted as ``scheduled`` while
-    # child 2's ``transition_to`` rejects the move (concurrent admin
-    # edit, state-machine conflict) — the route 422s but the post is
-    # left in a half-scheduled state.
+    # One outer atomic: a deadline approval, the quota checks and the
+    # per-child transitions commit together or not at all. Without it, child 1
+    # could be persisted as ``scheduled`` (or approved by deadline) while
+    # child 2 is refused — the route errors but the post is left half-moved.
     from django.db import transaction
 
     with transaction.atomic():
+        if payload.approval_deadline is not None:
+            from apps.approvals.services import approve_after_deadline
+
+            try:
+                approve_after_deadline(
+                    post,
+                    request.user,
+                    request.api_key.workspace,
+                    deadline=payload.approval_deadline,
+                    api_key_name=request.api_key.name,
+                )
+            except ValueError as exc:
+                raise HttpError(409, str(exc)) from exc
+
+        # Schedule every draft or approved child; a single-account key produces
+        # one child, but defensively we apply the transition to all of them so we
+        # don't half-schedule. Drafts still hit the workspace approval gate in
+        # ``transition_platform_post``; approved children have passed it.
+        drafts = list(post.platform_posts.filter(status__in=("draft", "approved")))
+        if not drafts:
+            raise HttpError(409, "No draft or approved platform posts to schedule.")
+
+        # Quota check is per-account: an over-quota account fails the whole
+        # route with 429 before any child moves.
+        for pp in drafts:
+            check_platform_quota(pp.social_account)
+
         for pp in drafts:
             try:
                 transition_platform_post(pp, "scheduled", scheduled_at=payload.scheduled_at)

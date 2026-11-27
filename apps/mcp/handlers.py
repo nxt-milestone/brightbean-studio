@@ -688,33 +688,45 @@ def _schedule_draft(args: dict, context: dict[str, Any]) -> dict:
     if "scheduled_at" not in args:
         raise JsonRpcError(INVALID_PARAMS, "scheduled_at is required (ISO 8601)")
     scheduled_at = _parse_iso_datetime(args["scheduled_at"], "scheduled_at")
+    deadline = None
+    if args.get("approval_deadline") is not None:
+        deadline = _parse_iso_datetime(args["approval_deadline"], "approval_deadline")
 
     api_key = context["api_key"]
     post = _get_post_for_key(api_key, args["post_id"])
-    # Approved children count too: in a workspace that requires approval, a
-    # draft is refused by ``transition_platform_post`` but an approved child
-    # (a person signed it off) can be scheduled, as the REST route does.
-    drafts = [pp for pp in post.platform_posts.all() if pp.status in ("draft", "approved")]
-    if not drafts:
-        raise JsonRpcError(INVALID_PARAMS, "No draft or approved platform posts to schedule")
 
-    # Per-platform 24h quota check, one per child, BEFORE we mutate
-    # anything — over-quota fails the whole call with no partial commit.
-    for pp in drafts:
-        try:
-            check_platform_quota(pp.social_account)
-        except HttpError as exc:
-            raise JsonRpcError(
-                INVALID_PARAMS,
-                f"Per-platform daily quota reached for {pp.social_account.platform}: {exc.message}",
-            ) from exc
-
-    # Wrap the per-child loop in a single outer atomic — same reasoning
-    # as ``cancel_post``: a mid-loop ValueError (concurrent admin
-    # transition, state-machine rejection on a later child, workspace
-    # approval-mode rejection from ``transition_platform_post``) rolls
-    # back any earlier ``scheduled`` commits.
+    # One outer atomic — same reasoning as the REST route: a deadline
+    # approval, a quota refusal or a mid-loop ValueError (concurrent admin
+    # transition, workspace approval-mode rejection from
+    # ``transition_platform_post``) rolls back everything before it.
     with transaction.atomic():
+        if deadline is not None:
+            from apps.approvals.services import approve_after_deadline
+
+            try:
+                approve_after_deadline(
+                    post, api_key.issued_by, api_key.workspace, deadline=deadline, api_key_name=api_key.name
+                )
+            except ValueError as exc:
+                raise JsonRpcError(INVALID_PARAMS, str(exc)) from exc
+
+        # Approved children count too: in a workspace that requires approval, a
+        # draft is refused by ``transition_platform_post`` but an approved child
+        # (a person signed it off) can be scheduled, as the REST route does.
+        # A fresh query, not the prefetched children: a deadline approval just changed them.
+        drafts = list(post.platform_posts.filter(status__in=("draft", "approved")).select_related("social_account"))
+        if not drafts:
+            raise JsonRpcError(INVALID_PARAMS, "No draft or approved platform posts to schedule")
+
+        for pp in drafts:
+            try:
+                check_platform_quota(pp.social_account)
+            except HttpError as exc:
+                raise JsonRpcError(
+                    INVALID_PARAMS,
+                    f"Per-platform daily quota reached for {pp.social_account.platform}: {exc.message}",
+                ) from exc
+
         for pp in drafts:
             try:
                 transition_platform_post(pp, "scheduled", scheduled_at=scheduled_at)
@@ -745,6 +757,15 @@ register_tool(
                 "scheduled_at": {
                     "type": "string",
                     "description": "ISO 8601 UTC timestamp (e.g. 2026-06-01T14:00:00Z)",
+                },
+                "approval_deadline": {
+                    "type": "string",
+                    "description": (
+                        "ISO 8601 UTC approval deadline. When set, a post still pending review counts as "
+                        "approved because nobody decided by then (recorded as deadline_passed with the key's "
+                        "name) and is scheduled. Refused while the deadline is ahead, when any platform post "
+                        "is a draft, changes requested or rejected, and in the internal-and-client workflow."
+                    ),
                 },
             },
             "required": ["post_id", "scheduled_at"],
