@@ -10,6 +10,7 @@ For the bundled case the resulting :class:`ApprovalAction` row stores
 the audit trail remembers exactly which target was acted on.
 """
 
+import datetime as dt
 import logging
 
 from django.db import transaction
@@ -195,6 +196,55 @@ def approve_post(target, user, workspace, comment=""):
             body=f'Your post "{post.caption_snippet}" was approved by {user.display_name}.',
         )
 
+    return post
+
+
+def approve_after_deadline(post, user, workspace, *, deadline, api_key_name=""):
+    """E-121: a post nobody approved or sent back by its approval deadline counts as approved.
+
+    Moves every ``pending_review`` child to ``approved`` and records one
+    ``deadline_passed`` action under the key's name. Raises ``ValueError``
+    while the deadline is ahead, in the two-stage workflow (the client still
+    signs off), and when any child is a draft, changes requested or rejected:
+    then nobody was asked, or a person said no. The webhook fires on commit, so
+    a caller that schedules in the same transaction and fails sends nothing.
+    """
+    from django.utils import timezone
+
+    if timezone.is_naive(deadline):
+        deadline = timezone.make_aware(deadline, dt.UTC)
+    if deadline > timezone.now():
+        raise ValueError("The approval deadline has not passed yet.")
+    if workspace.approval_workflow_mode == "required_internal_and_client":
+        raise ValueError("A deadline can't stand in for the client's approval in this workspace.")
+
+    with transaction.atomic():
+        children = list(post.platform_posts.select_for_update())
+        blocked = sorted({pp.status for pp in children} & {"draft", "changes_requested", "rejected"})
+        if blocked:
+            raise ValueError(f"Not pending review, refused: {', '.join(blocked)}.")
+        pending = [pp for pp in children if pp.status == "pending_review"]
+        if not pending:
+            raise ValueError("No platform post is pending review.")
+        for pp in pending:
+            _transition_or_skip(pp, "approved")
+        ApprovalAction.objects.create(
+            post=post,
+            user=user,
+            action=ApprovalAction.ActionType.DEADLINE_PASSED,
+            comment=f"Freigabefrist {deadline.astimezone(dt.UTC):%Y-%m-%d %H:%M} UTC verstrichen, niemand hat entschieden.",
+            api_key_name=api_key_name,
+        )
+        transaction.on_commit(
+            lambda: _notify_decision(
+                post,
+                user,
+                workspace,
+                EventType.POST_APPROVED,
+                title="Post approved",
+                body=f'Your post "{post.caption_snippet}" counts as approved: nobody decided by its deadline.',
+            )
+        )
     return post
 
 

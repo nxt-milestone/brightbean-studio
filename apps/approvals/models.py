@@ -22,6 +22,8 @@ class ApprovalAction(models.Model):
         REJECTED = "rejected", "Rejected"
         RESUBMITTED = "resubmitted", "Resubmitted"
         HELD = "held", "Hold Requested"
+        # E-121: nobody approved or sent the post back by its approval deadline.
+        DEADLINE_PASSED = "deadline_passed", "Frist abgelaufen"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     post = models.ForeignKey(
@@ -47,6 +49,8 @@ class ApprovalAction(models.Model):
     )
     action = models.CharField(max_length=20, choices=ActionType.choices)
     comment = models.TextField(blank=True, default="")
+    # Name of the Agent API key that acted, as on ``PostComment``; empty for people.
+    api_key_name = models.CharField(max_length=100, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -58,6 +62,13 @@ class ApprovalAction(models.Model):
 
     def __str__(self):
         return f"{self.get_action_display()} by {self.user} on {self.post_id}"
+
+    @property
+    def actor_name(self):
+        """Who the history shows: the API key's name, else the person's."""
+        if self.api_key_name:
+            return self.api_key_name
+        return self.user.display_name if self.user else ""
 
 
 class PostComment(models.Model):

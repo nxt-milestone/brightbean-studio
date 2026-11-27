@@ -1467,7 +1467,7 @@
                         <div class="flex items-start gap-2">
                             <div class="w-1.5 h-1.5 rounded-full mt-1.5 flex-shrink-0 {% if action.action == 'approved' %}bg-emerald-400{% elif action.action == 'rejected' %}bg-red-400{% elif action.action == 'changes_requested' %}bg-amber-400{% else %}bg-stone-300{% endif %}"></div>
                             <div>
-                                <p class="text-xs text-stone-600"><span class="font-semibold">{{ action.user.display_name }}</span> {{ action.get_action_display|lower }}</p>
+                                <p class="text-xs text-stone-600"><span class="font-semibold">{{ action.actor_name }}</span> {{ action.get_action_display|lower }}</p>
                                 {% if action.comment %}<p class="text-xs text-stone-400 mt-0.5">"{{ action.comment|truncatechars:80 }}"</p>{% endif %}
                                 <p class="text-[10px] text-stone-400">{{ action.created_at|timesince }} ago</p>
                             </div>

@@ -353,6 +353,15 @@ class UpdatePostRequest(Schema):
 
 class ScheduleRequest(Schema):
     scheduled_at: dt.datetime = Field(..., description="UTC timestamp at which the publisher should fire the post.")
+    approval_deadline: dt.datetime | None = Field(
+        None,
+        description=(
+            "The post's approval deadline (UTC). When set, a post still pending review counts as approved because "
+            "nobody approved it or sent it back by then; it is recorded as ``deadline_passed`` with the key's name "
+            "and then scheduled. Refused (409) while the deadline is ahead, when any platform post is a draft, "
+            "changes requested or rejected, and in the internal-and-client workflow."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -411,9 +420,14 @@ class ApprovalActionSummary(Schema):
 
     action: str = Field(
         ...,
-        description="``submitted``, ``approved``, ``changes_requested``, ``rejected``, ``resubmitted`` or ``held``.",
+        description=(
+            "``submitted``, ``approved``, ``changes_requested``, ``rejected``, ``resubmitted``, ``held`` or "
+            "``deadline_passed`` (nobody decided by the approval deadline, so it counts as approved)."
+        ),
     )
-    user_name: str = Field("", description="Who acted. Empty if that user was deleted.")
+    user_name: str = Field(
+        "", description="Who acted: the API key's name for an agent, else the person. Empty if that user was deleted."
+    )
     platform_post_id: uuid.UUID | None = Field(
         None, description="The platform child the decision targeted; null when it covered the whole post."
     )
@@ -428,7 +442,7 @@ class ApprovalActionSummary(Schema):
     def from_action(cls, action) -> ApprovalActionSummary:
         return cls(
             action=action.action,
-            user_name=action.user.display_name if action.user else "",
+            user_name=action.actor_name,
             platform_post_id=action.platform_post_id,
             comment=action.comment,
             created_at=action.created_at,
