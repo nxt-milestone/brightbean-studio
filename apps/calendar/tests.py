@@ -950,6 +950,25 @@ class PublishTabTimezoneTests(TestCase):
         resp = self.client.get(url + "?tz=")
         self.assertEqual(resp.status_code, 200)
 
+    def test_proposed_draft_shows_on_calendar_as_proposed(self):
+        url = reverse("calendar:calendar", kwargs={"workspace_id": self.ws.id})
+        for view in ("month", "week", "day"):
+            with self.subTest(view=view):
+                resp = self.client.get(
+                    url, {"mode": "calendar", "view": view, "date": "2027-09-01"}, HTTP_HX_REQUEST="true"
+                )
+                self.assertEqual(resp.status_code, 200)
+                self.assertContains(resp, "is-proposed")
+
+    def test_scheduled_post_is_not_marked_proposed(self):
+        self.post.proposed_publish_at = None
+        self.post.scheduled_at = datetime(2027, 9, 1, 9, 0, tzinfo=zoneinfo.ZoneInfo("Europe/Berlin"))
+        self.post.save()
+        url = reverse("calendar:calendar", kwargs={"workspace_id": self.ws.id})
+        resp = self.client.get(url, {"mode": "calendar", "view": "month", "date": "2027-09-01"}, HTTP_HX_REQUEST="true")
+        self.assertContains(resp, "post-chip status-draft")
+        self.assertNotContains(resp, "is-proposed")
+
 
 class SlotOccupancyQueueTests(TestCase):
     """Stable slot-occupancy: local ops fill/vacate one slot and preserve gaps."""

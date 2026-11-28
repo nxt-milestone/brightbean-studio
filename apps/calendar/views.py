@@ -173,8 +173,11 @@ def _get_filtered_posts(workspace, request):
 def _get_filtered_platform_posts(workspace, request):
     """Return a PlatformPost queryset filtered by calendar query params.
 
-    Each row carries an ``effective_at`` annotation that falls back to
-    ``post.scheduled_at`` when the PlatformPost has no per-platform override.
+    Each row carries a ``committed_at`` annotation that falls back to
+    ``post.scheduled_at`` when the PlatformPost has no per-platform override,
+    and an ``effective_at`` (where the chip sits) that further falls back to a
+    draft's ``post.proposed_publish_at``. A chip with no ``committed_at`` is a
+    proposal only. Never reuse this for the publisher, which must ignore proposals.
     """
     from django.db.models.functions import Coalesce
 
@@ -185,7 +188,8 @@ def _get_filtered_platform_posts(workspace, request):
         # would fire its own media_attachments + media_asset queries (N+1) on
         # every month/week/day render.
         .prefetch_related("post__media_attachments__media_asset")
-        .annotate(effective_at=Coalesce("scheduled_at", "post__scheduled_at"))
+        .annotate(committed_at=Coalesce("scheduled_at", "post__scheduled_at"))
+        .annotate(effective_at=Coalesce("committed_at", "post__proposed_publish_at"))
     )
 
     # Status filter — editorial status now lives on the PlatformPost itself,
@@ -302,7 +306,8 @@ def _get_calendar_slot_occurrences(workspace, request, display_tz, visible_dates
     taken_keys = set()
     for pp in platform_posts:
         pp.takes_calendar_slot = False
-        if not pp.effective_at:
+        # A proposal doesn't occupy a channel slot; the slot stays open.
+        if not pp.committed_at:
             continue
         local_dt = pp.effective_at.astimezone(display_tz)
         key = (pp.social_account_id, local_dt.date(), local_dt.hour, local_dt.minute)
