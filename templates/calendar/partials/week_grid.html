@@ -53,8 +53,8 @@ Context: week_days, week_slots, workspace.
             {% endif %}
             {% for pp in cell.posts %}
             <a href="{% url 'composer:compose_edit' workspace_id=workspace.id post_id=pp.post_id %}?account={{ pp.social_account_id }}"
-               class="post-chip status-{{ pp.status }}{% if pp.is_reschedulable %} is-draggable{% endif %}"
-               title="{% if pp.is_reschedulable %}Move or open{% else %}Open{% endif %}"
+               class="post-chip status-{{ pp.status }}{% if pp.is_reschedulable %} is-draggable{% endif %}{% if not pp.committed_at %} is-proposed{% endif %}"
+               title="{% if not pp.committed_at %}Proposed publishing time, not scheduled. {% endif %}{% if pp.is_reschedulable %}Move or open{% else %}Open{% endif %}"
                {% if pp.is_reschedulable %}draggable="true" data-platform-post-id="{{ pp.id }}"{% else %}draggable="false"{% endif %}>
                 {% if pp.is_bulk_selectable %}{% include "calendar/partials/_select_checkbox.html" with pp_id=pp.id %}{% endif %}
                 <span class="w-4 h-4 rounded flex items-center justify-center pi-{{ pp.social_account.platform }} flex-shrink-0 text-white">
